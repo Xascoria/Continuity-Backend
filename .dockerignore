@@ -1,0 +1,10 @@
+.venv
+.git
+.gitignore
+__pycache__
+*.pyc
+data
+secrets
+prompt.md
+main.py
+backend/test_*.py

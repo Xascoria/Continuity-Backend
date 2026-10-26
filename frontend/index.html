@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>20Seconds Admin</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Login -->
+  <main id="login-view" class="container narrow" hidden>
+    <h1>20Seconds Admin</h1>
+    <form id="login-form" class="card">
+      <h2>Sign in</h2>
+      <label>Username <input type="text" id="login-username" autocomplete="username" required></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+
+  <!-- Dashboard -->
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <h1>20Seconds Admin</h1>
+      <div>
+        <span id="whoami"></span>
+        <button id="logout-btn" class="secondary">Log out</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="health">Health</button>
+      <button class="tab" data-tab="database">Database</button>
+    </nav>
+
+    <main class="container">
+      <section id="tab-health" class="tab-panel">
+        <div class="card">
+          <h2>API Health</h2>
+          <p>Status: <span id="status" class="badge">unknown</span></p>
+          <button id="check-btn">Check health</button>
+        </div>
+        <div class="card">
+          <h2>Recent checks</h2>
+          <table id="history">
+            <thead>
+              <tr><th>ID</th><th>Status</th><th>Checked at</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tab-database" class="tab-panel" hidden>
+        <div class="card">
+          <div class="toolbar">
+            <label>Table <select id="table-select"></select></label>
+            <button id="db-refresh" class="secondary">Refresh</button>
+            <span id="db-info" class="muted"></span>
+            <span class="spacer"></span>
+            <button id="db-prev" class="secondary">&laquo; Prev</button>
+            <button id="db-next" class="secondary">Next &raquo;</button>
+          </div>
+          <p id="db-error" class="error" hidden></p>
+          <p class="muted small">Timestamps are UTC (ISO format). Newest rows first. Leave a field empty when adding a row to use its default.</p>
+          <div class="table-wrap">
+            <table id="db-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/database.js"></script>
+  <script>Admin.start();</script>
+</body>
+</html>

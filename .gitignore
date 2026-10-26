@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+
+# runtime data and secrets
+data/
+secrets/admin.json
