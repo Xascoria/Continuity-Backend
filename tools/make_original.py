@@ -1,7 +1,6 @@
 """Convert image/1-8_480x384__1_simple.png into image/original.txt.
 
-The source is 480x384; the game image is 960x768, so it is upscaled 2x
-(nearest neighbour). Every pixel is mapped to the closest palette colour and
+The source is 480x384 = 15x12 tiles of 32x32. Every pixel is mapped to the closest palette colour and
 written as its symbol (see backend_design.md section 2.1).
 
 Usage (needs Pillow):  python tools/make_original.py
@@ -14,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "image" / "1-8_480x384__1_simple.png"
 TARGET = ROOT / "image" / "original.txt"
 SYMBOLS = "123456789abc"
-WIDTH, HEIGHT = 960, 768
+WIDTH, HEIGHT = 480, 384
 
 
 def main() -> None:
@@ -23,7 +22,7 @@ def main() -> None:
         for line in (ROOT / "image" / "palette.txt").read_text().split()
     ]
     assert len(palette) == len(SYMBOLS)
-    img = Image.open(SOURCE).convert("RGB").resize((WIDTH, HEIGHT), Image.NEAREST)
+    img = Image.open(SOURCE).convert("RGB")
 
     cache = {}
 

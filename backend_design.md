@@ -12,15 +12,15 @@ The database currently uses SQLite at `data/app.db` by default. SQLAlchemy model
 
 ## 2. Game model
 
-- Original image: 30 × 24 tiles, each 32 × 32 pixels (960 × 768 total).
-- Tile coordinates: `x ∈ [0,29]`, `y ∈ [0,23]`, origin at top-left.
+- Original image: 15 × 12 tiles, each 32 × 32 pixels (480 × 384 total).
+- Tile coordinates: `x ∈ [0,14]`, `y ∈ [0,11]`, origin at top-left.
 - Game types `1` and `2` have independent iteration state, holds, submissions, progress, and leaderboards.
 - Iteration `0` is the original image and is always settled.
 - **Iterations are unbounded.** There is no final iteration, so a free tile always exists (a new iteration can always be opened).
 - **Iterations open sequentially but overlap.** Iteration `n+1` is opened only when every tile still unaccepted in all open iterations is currently held. Because a hold lasts up to 40 seconds, near the end of iteration `n` some players are still finishing `n` tiles while others already receive `n+1` tiles. With many concurrent players, or after abandoned holds, older iterations (`n-1`, `n-2`, …) can also remain open while `n` is running.
-- An iteration is **open** until all 720 tile coordinates have an accepted submission; after that it is **closed**. A tile `(game_type, iteration, x, y)` is **settled** once a valid submission has been accepted for it.
+- An iteration is **open** until all 180 tile coordinates have an accepted submission; after that it is **closed**. A tile `(game_type, iteration, x, y)` is **settled** once a valid submission has been accepted for it.
 - A submission at iteration `n` is judged against its **reference**: the same tile from the nearest lower iteration in which it is settled (section 5). Normally that is `n-1`, but fallback is decided per tile.
-- Each iteration has 720 tile coordinates.
+- Each iteration has 180 tile coordinates.
 
 ### Terminology (shared with the frontend document)
 
@@ -103,7 +103,7 @@ The pixel string is abbreviated in examples and must be the full length (1,024 c
 6. Resolve the reference for this assignment (section 5) and, in one atomic operation, create the hold for `(game_type, iteration, x, y)` for this user, storing the reference metadata with it.
 7. Return the coordinate, iteration, and level information.
 
-There is no "no tile available" outcome: iterations are unbounded, so step 4 can always open a new iteration with 720 free tiles. Any failure to allocate is an `INTERNAL_ERROR`.
+There is no "no tile available" outcome: iterations are unbounded, so step 4 can always open a new iteration with 180 free tiles. Any failure to allocate is an `INTERNAL_ERROR`.
 
 The coordinate order can be held in memory for efficient sampling, but persistent submission and hold records are the source of truth. Allocation and hold acquisition must be atomic so two concurrent requests never receive the same tile.
 
@@ -111,7 +111,7 @@ The coordinate order can be held in memory for efficient sampling, but persisten
 
 A hold expires 40 seconds after acquisition unless the user successfully submits that same tile for the same game type and iteration. A successful submission consumes the hold. When a hold expires the tile becomes free again **in the same iteration** and is eligible for allocation (lowest open iteration first).
 
-**Track holds per open iteration, not just for the newest one.** A hold on an older iteration stays valid after newer iterations have started, and the submission must still be accepted against it. Candidate state (free tiles and holds) for an iteration is kept until the iteration is closed (all 720 tiles accepted); only then may that iteration's hold records and candidate state be discarded.
+**Track holds per open iteration, not just for the newest one.** A hold on an older iteration stays valid after newer iterations have started, and the submission must still be accepted against it. Candidate state (free tiles and holds) for an iteration is kept until the iteration is closed (all 180 tiles accepted); only then may that iteration's hold records and candidate state be discarded.
 
 The current database has no hold table. Add a persistent `tile_holds` table (section 8.2). A process-local dictionary alone is insufficient with multiple workers and loses active holds on restart.
 
@@ -137,8 +137,8 @@ The player sees a **64×64 pixel window** of the image that contains the empty 3
 
 **Window rule.** For target tile `(x, y)`:
 ```
-wx = clamp(32*x - 16, 0, 960 - 64)
-wy = clamp(32*y - 16, 0, 768 - 64)
+wx = clamp(32*x - 16, 0, 480 - 64)
+wy = clamp(32*y - 16, 0, 384 - 64)
 window = [wx, wx+64) × [wy, wy+64)      (image pixel coordinates)
 context = window minus the target tile (32*x, 32*y, 32, 32)
 ```
@@ -150,7 +150,7 @@ The window is never shrunk: when the target is near an image edge it is shifted 
 | Left edge `(0,7)` | `(0, 208, 64, 64)` | 5 pieces: 32×16 above, 32×16 below, full 32×32 right neighbour, 32×16 above-right, 32×16 below-right |
 | Corner `(0,0)` | `(0, 0, 64, 64)` | 3 pieces, all three neighbours shown in full: right, below, below-right (each 32×32) |
 
-The same shifting applies at the right edge (`x = 29`), top edge (`y = 0`), and bottom edge (`y = 23`), and to the other three corners.
+The same shifting applies at the right edge (`x = 14`), top edge (`y = 0`), and bottom edge (`y = 11`), and to the other three corners.
 
 **Decomposition.** Cut the context along tile boundaries (multiples of 32 in image coordinates) so that every region lies inside a single source tile and has a single `source_iteration`. Each region carries its own `source_iteration`, which may differ between regions.
 
@@ -197,7 +197,7 @@ Fields: `token`, `x`, `y`, `canvas` (symbol string, section 3), `time_taken`, `g
 6. Count painted pixels (characters other than `.`). Reject if coverage is **below 60%**. For 1,024 pixels, 615 painted pixels is the minimum accepted count because `ceil(0.60 × 1024) = 615`; 614 is rejected.
 7. Replace every `.` with `1` (`#cdd4d0`).
 8. Calculate accuracy as `matching_pixels / 1024` against the **reference stored on the hold**. Accuracy is a ratio in `[0,1]`; multiply by 100 only for presentation.
-9. In one transaction, persist the normalized canvas, accuracy, iteration, coordinate, game type, user, `submission_id`, reference metadata, and submission time; consume the hold; if this acceptance brings the iteration to 720 accepted tiles, mark the iteration closed; increment `state_version`; update any leaderboard/progress aggregates or mark them dirty.
+9. In one transaction, persist the normalized canvas, accuracy, iteration, coordinate, game type, user, `submission_id`, reference metadata, and submission time; consume the hold; if this acceptance brings the iteration to 180 accepted tiles, mark the iteration closed; increment `state_version`; update any leaderboard/progress aggregates or mark them dirty.
 10. Return success only after the transaction commits.
 
 ### Response
@@ -221,7 +221,7 @@ Fields: `token`, `x`, `y`, `canvas` (symbol string, section 3), `time_taken`, `g
 On startup, reconstruct iteration state independently for game types 1 and 2 from persisted submissions and holds:
 
 1. For each game type, group accepted submissions by `(iteration, x, y)`. Duplicate coordinate records must not inflate counts.
-2. An iteration is **open** if it is at or below the highest iteration that has any accepted submission or hold, and has fewer than 720 accepted coordinates. There can be several open iterations. Iterations above the highest known one are opened lazily by the allocation algorithm.
+2. An iteration is **open** if it is at or below the highest iteration that has any accepted submission or hold, and has fewer than 180 accepted coordinates. There can be several open iterations. Iterations above the highest known one are opened lazily by the allocation algorithm.
 3. For each open iteration, rebuild the candidate stack from coordinates that are neither accepted nor under an unexpired hold.
 4. Restore holds from `tile_holds` using the persisted `expires_at`; expired holds free their tile. Keep restored holds (with their stored reference metadata) for every open iteration.
 5. Ban state is read from `users.banned_at`.
@@ -320,18 +320,18 @@ Keep the existing request shape:
   "game_type": 1,
   "state_version": 42,
   "cache_version": "1",
-  "grid": { "columns": 30, "rows": 24, "tile_size": 32 },
+  "grid": { "columns": 15, "rows": 12, "tile_size": 32 },
   "open_iterations": [
-    { "iteration": 2, "filled_tiles": 719, "total_tiles": 720 },
-    { "iteration": 3, "filled_tiles": 12, "total_tiles": 720 }
+    { "iteration": 2, "filled_tiles": 179, "total_tiles": 180 },
+    { "iteration": 3, "filled_tiles": 12, "total_tiles": 180 }
   ],
-  "latest_iteration": [3, 3, 2, 0, "…720 integers…"],
+  "latest_iteration": [3, 3, 2, 0, "…180 integers…"],
   "player": { "contribution_count": 14, "mean_accuracy": 0.713 },
   "error": null
 }
 ```
 
-- `latest_iteration` is a flat row-major array of exactly 720 integers (`index = y * 30 + x`). Each value is the highest iteration in which that tile is settled; `0` means only the original image exists. The client builds the current image by taking, for each tile, `(game_type, latest_iteration[i], x, y)` from its cache or from `fetch_tiles` (iteration `0` comes from the bundled image).
+- `latest_iteration` is a flat row-major array of exactly 180 integers (`index = y * 15 + x`). Each value is the highest iteration in which that tile is settled; `0` means only the original image exists. The client builds the current image by taking, for each tile, `(game_type, latest_iteration[i], x, y)` from its cache or from `fetch_tiles` (iteration `0` comes from the bundled image).
 - `open_iterations` lists every open iteration with its filled count. Overall progress for an iteration is `filled_tiles / total_tiles`; the highest open iteration is the frontier.
 - `state_version` increments whenever a submission changes visible game state, so clients can cheaply tell whether to refresh. Consider supporting `since_version` later.
 - `cache_version` identifies the image, palette symbol table, and rules versions. When it changes, clients must drop cached tiles.
@@ -402,7 +402,7 @@ There is no `NO_TILE_AVAILABLE` code (section 4). Return a suitable HTTP status 
 - Tile allocation is unique under concurrent requests and holds expire after 40 seconds.
 - Allocation picks the lowest open iteration with a free tile and opens the next iteration only when none has one.
 - Holds are tracked for every open iteration; a submission against an older open iteration is accepted if its hold is valid.
-- An iteration's hold records and candidate state are discarded only after all 720 tiles of that iteration are accepted.
+- An iteration's hold records and candidate state are discarded only after all 180 tiles of that iteration are accepted.
 - A submission is accepted only with a valid hold for the same user, mode, iteration, and coordinate.
 - Replaying an accepted `submission_id` returns the original success response and creates no duplicate.
 - A user with more than 5 active holds is banned immediately and receives `USER_BANNED` afterwards.

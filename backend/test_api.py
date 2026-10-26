@@ -17,7 +17,7 @@ Path(os.environ["ADMIN_SECRET_FILE"]).write_text(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from . import game, models  # noqa: E402
+from . import game, models, security  # noqa: E402
 from .database import SessionLocal  # noqa: E402
 from .main import app  # noqa: E402
 
@@ -105,7 +105,7 @@ class ApiTests(unittest.TestCase):
             "INVALID_GAME_TYPE")
 
     def test_context_layout(self):
-        counts = {(4, 7): 8, (0, 7): 5, (0, 0): 3, (29, 23): 3, (29, 0): 3}
+        counts = {(4, 7): 8, (0, 7): 5, (0, 0): 3, (14, 11): 3, (14, 0): 3}
         for (x, y), n in counts.items():
             (wx, wy), cells = game.context_layout(x, y)
             self.assertEqual(len(cells), n, (x, y))
@@ -130,7 +130,7 @@ class ApiTests(unittest.TestCase):
 
         # replay returns the same body; a different tile with the same id is rejected
         self.assertEqual(self.submit(token, sq, canvas, sid).json(), body)
-        r = self.submit(token, sq, canvas, sid, x=(sq["x"] + 1) % 30)
+        r = self.submit(token, sq, canvas, sid, x=(sq["x"] + 1) % 15)
         self.assertEqual((r.status_code, r.json()["error"]), (409, "SUBMISSION_ID_REUSED"))
         r = self.submit(token, sq, canvas)
         self.assertEqual(r.json()["error"], "TILE_ALREADY_SUBMITTED")
@@ -155,7 +155,7 @@ class ApiTests(unittest.TestCase):
             ({"canvas": "1" * 1023}, 400, "CANVAS_INVALID"),
             ({"canvas": "." * 410 + "2" * 614}, 400, "INSUFFICIENT_COVERAGE"),
             ({"submission_id": "nope"}, 400, "INVALID_SUBMISSION_ID"),
-            ({"x": 30}, 400, "INVALID_COORDINATE"),
+            ({"x": 15}, 400, "INVALID_COORDINATE"),
             ({"game_type": 3}, 400, "INVALID_GAME_TYPE"),
             ({"iteration": sq["iteration"] + 5}, 404, "HOLD_NOT_FOUND"),
         ]
@@ -220,8 +220,14 @@ class ApiTests(unittest.TestCase):
         user = self.register("Filler")["token"]
         with SessionLocal() as db:
             uid = db.query(models.User).filter_by(uuid=user).one().user_id
-            for y in range(24):
-                for x in range(30):
+            done = set(db.query(models.SubmittedForTypeOne.x,
+                                models.SubmittedForTypeOne.y).filter_by(iteration=1))
+            db.query(models.SubmittedForTypeOne).filter_by(iteration=1).update(
+                {"submitted_string": "3" * 1024})
+            for y in range(12):
+                for x in range(15):
+                    if (x, y) in done:
+                        continue
                     db.add(models.SubmittedForTypeOne(
                         user_id=uid, submitted_string="3" * 1024, accuracy=1.0,
                         iteration=1, x=x, y=y, submission_id=str(uuid.uuid4())))
@@ -230,11 +236,11 @@ class ApiTests(unittest.TestCase):
         p = self.client.post("/api/user/fetch_current_progress",
                              json={"token": user, "game_type": 1}).json()
         self.assertTrue(p["success"])
-        self.assertEqual(len(p["latest_iteration"]), 720)
+        self.assertEqual(len(p["latest_iteration"]), 180)
         self.assertEqual(set(p["latest_iteration"]), {1})
         self.assertEqual(p["open_iterations"], [])
-        self.assertEqual(p["player"]["contribution_count"], 720)
-        self.assertEqual(p["grid"], {"columns": 30, "rows": 24, "tile_size": 32})
+        self.assertEqual(p["player"]["contribution_count"], 180 - len(done))
+        self.assertEqual(p["grid"], {"columns": 15, "rows": 12, "tile_size": 32})
 
         sq = self.square(user, 1)
         self.assertEqual(sq["iteration"], 2)
@@ -248,14 +254,14 @@ class ApiTests(unittest.TestCase):
                              json={"token": user, "game_type": 1}).json()
         self.assertEqual(p["state_version"], before + 1)
         self.assertEqual(p["open_iterations"],
-                         [{"iteration": 2, "filled_tiles": 1, "total_tiles": 720}])
+                         [{"iteration": 2, "filled_tiles": 1, "total_tiles": 180}])
 
         # leaderboard: qualifies with >= 10 contributions
         lb = self.client.post("/api/user/request_leaderboard",
                               json={"token": user, "game_type": 1}).json()
         mine = [e for e in lb["top_contributors"] if e["username"] == "Filler"]
         self.assertEqual(len(mine), 1)
-        self.assertEqual(mine[0]["count"], 721)
+        self.assertEqual(mine[0]["count"], 181 - len(done))
         self.assertTrue(mine[0]["is_current_user"])
 
         # fetch_tiles
@@ -281,6 +287,165 @@ class ApiTests(unittest.TestCase):
             "INVALID_GAME_TYPE")
         for bad in [{"token": token}, {"game_type": 1}]:
             self.assertEqual(self.client.post(url, json=bad).status_code, 422)
+
+    # ---- suspicious events ---------------------------------------------------
+
+    def events(self, **params):
+        r = self.client.get("/api/admin/suspicious_events", params=params, auth=ADMIN)
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    def test_suspicious_events_need_admin(self):
+        self.assertEqual(self.client.get("/api/admin/suspicious_events").status_code, 401)
+
+    def test_fast_submissions_and_auto_ban_are_logged(self):
+        token = self.register("Speedy Gonzales")["token"]
+        uid = next(u for u in self.admin_rows("users")
+                   if u["username"] == "Speedy Gonzales")["user_id"]
+        # two submissions (different game types) back to back
+        for gt in (1, 2):
+            self.assertTrue(self.submit(token, self.square(token, gt)).json()["success"])
+        fast = self.events(event_type="FAST_SUBMISSIONS", user_id=uid)["events"]
+        self.assertEqual(len(fast), 1)
+        self.assertLess(fast[0]["details"]["seconds_since_previous"], 20)
+        self.assertEqual(fast[0]["severity"], "warning")
+
+        # auto ban
+        with SessionLocal() as db:
+            for i in range(5):
+                db.add(models.TileHold(
+                    game_type=2, iteration=901, x=i, y=0, user_id=uid,
+                    expires_at=models.utcnow() + timedelta(seconds=30),
+                    reference_iteration=0))
+            db.commit()
+        self.client.post("/api/user/request_square", json={"token": token, "game_type": 1})
+        ban = self.events(event_type="AUTO_BAN", user_id=uid)
+        self.assertEqual(ban["total"], 1)
+        self.assertEqual(ban["events"][0]["severity"], "critical")
+        self.assertEqual(ban["events"][0]["details"]["active_holds"], 5)
+        self.assertGreaterEqual(ban["last_24h"]["AUTO_BAN"], 1)
+        # later calls with the banned token are logged separately, not as another ban
+        self.client.post("/api/user/request_square", json={"token": token, "game_type": 1})
+        self.assertEqual(self.events(event_type="AUTO_BAN", user_id=uid)["total"], 1)
+        self.assertEqual(self.events(event_type="BANNED_USER_ACCESS", user_id=uid)["total"], 1)
+
+    def test_submit_without_hold_is_logged(self):
+        token = self.register("Forger")["token"]
+        uid = next(u for u in self.admin_rows("users") if u["username"] == "Forger")["user_id"]
+        sq = {"x": 1, "y": 1, "game_type": 1, "iteration": 77}
+        self.assertEqual(self.submit(token, sq).json()["error"], "HOLD_NOT_FOUND")
+        self.assertEqual(self.events(event_type="SUBMIT_WITHOUT_HOLD", user_id=uid)["total"], 1)
+
+    def test_traffic_monitor_rules(self):
+        t = [0.0]
+        m = security.Monitor(clock=lambda: t[0])
+        limit, window = security.IP_RATE
+        events = []
+        for i in range(limit + 5):
+            t[0] += window / (limit * 2)  # fast enough to exceed the rule
+            events += m.check_request("1.2.3.4", "/api/user/request_square")
+        self.assertEqual([e[0] for e in events], ["RATE_LIMIT_EXCEEDED"])  # cooldown dedupes
+        self.assertEqual(m.check_request("5.6.7.8", "/api/user/request_square"), [])
+
+        # slow traffic is fine
+        m2 = security.Monitor(clock=lambda: t[0])
+        for _ in range(limit * 2):
+            t[0] += window
+            self.assertEqual(m2.check_request("1.1.1.1", "/api/user/fetch_tiles"), [])
+
+        # repeated registers from one IP, whether they succeed or not
+        m3 = security.Monitor(clock=lambda: t[0])
+        types = []
+        for _ in range(security.REGISTER_RATE[0] + 1):
+            t[0] += 1
+            types += [e[0] for e in m3.check_request("9.9.9.9", security.REGISTER_PATH)]
+        self.assertEqual(types, ["REGISTER_FLOOD"])
+        # a different IP is unaffected
+        self.assertEqual(m3.check_request("8.8.8.8", security.REGISTER_PATH), [])
+
+        # invalid-token probing and admin brute force
+        m4 = security.Monitor(clock=lambda: t[0])
+        out = []
+        for _ in range(security.INVALID_TOKEN_RATE[0] + 1):
+            t[0] += 0.1
+            out += m4.check_invalid_token("7.7.7.7")
+        self.assertEqual([e[0] for e in out], ["INVALID_TOKEN_PROBING"])
+        out = []
+        for _ in range(security.ADMIN_LOGIN_RATE[0] + 1):
+            t[0] += 0.1
+            out += m4.check_admin_login_failure("7.7.7.7")
+        self.assertEqual([e[0] for e in out], ["ADMIN_LOGIN_BRUTEFORCE"])
+
+    def test_global_traffic_spike(self):
+        t = [0.0]
+        m = security.Monitor(clock=lambda: t[0])
+        limit, window = security.GLOBAL_RATE
+        types = set()
+        for i in range(limit + 2):
+            t[0] += window / (limit * 2)
+            types |= {e[0] for e in m.check_request(f"10.0.{i // 250}.{i % 250}", "/api/user/x")}
+        self.assertEqual(types, {"TRAFFIC_SPIKE"})  # no single IP is hot
+
+    def test_failed_admin_logins_and_register_floods_are_logged(self):
+        for _ in range(security.ADMIN_LOGIN_RATE[0] + 1):
+            self.client.post("/api/admin/login", auth=("boss", "wrong"))
+        self.assertGreaterEqual(self.events(event_type="ADMIN_LOGIN_BRUTEFORCE")["total"], 1)
+        for i in range(security.REGISTER_RATE[0] + 2):
+            self.client.post("/api/user/register", json={"username": f"Flood Name {i}"})
+        self.assertGreaterEqual(self.events(event_type="REGISTER_FLOOD")["total"], 1)
+    def test_admin_can_ban_user_and_ip(self):
+        token = self.register("Bad Actor")["token"]
+        uid = next(u for u in self.admin_rows("users") if u["username"] == "Bad Actor")["user_id"]
+        self.square(token, 1)  # leaves a hold
+        self.client.post("/api/user/submit_result", json={"token": token})  # 422, no event
+        # give the user an event row so the buttons apply
+        security.log_event("TEST_EVENT", "info", "testclient", uid)
+        ev = self.events(event_type="TEST_EVENT", user_id=uid)["events"][0]
+        self.assertEqual((ev["user_banned"], ev["ip_banned"]), (False, False))
+
+        post = lambda path, **kw: self.client.post(f"/api/admin/{path}", auth=ADMIN, **kw)
+        self.assertEqual(post(f"users/{uid}/ban").json()["banned"], True)
+        self.assertEqual(post("users/999999/ban").status_code, 404)
+        r = self.client.post("/api/user/request_square", json={"token": token, "game_type": 1})
+        self.assertEqual((r.status_code, r.json()["error"]), (403, "USER_BANNED"))
+        with SessionLocal() as db:
+            self.assertEqual(db.query(models.TileHold).filter_by(user_id=uid).count(), 0)
+        self.assertTrue(self.events(event_type="TEST_EVENT", user_id=uid)["events"][0]["user_banned"])
+        post(f"users/{uid}/unban")
+        self.assertTrue(self.square(token, 1)["success"])
+
+        try:
+            post("ban_ip", json={"ip": "testclient", "reason": "test"})
+            self.assertTrue(self.events(event_type="TEST_EVENT", user_id=uid)["events"][0]["ip_banned"])
+            security.ip_bans.invalidate()
+            r = self.client.post("/api/user/request_square", json={"token": token, "game_type": 1})
+            self.assertEqual((r.status_code, r.json()["error"]), (403, "IP_BANNED"))
+            # admin endpoints are exempt, so the admin can always undo it
+        finally:
+            post("unban_ip", json={"ip": "testclient"})
+        self.assertTrue(self.square(token, 1)["success"])
+
+    def test_visualizer(self):
+        token = self.register("Painter")["token"]
+        sq = self.square(token, 2)
+        self.assertTrue(self.submit(token, sq, "3" * 1024).json()["success"])
+        self.assertEqual(self.client.get("/api/admin/visualizer?game_type=2").status_code, 401)
+        s = self.client.get("/api/admin/visualizer?game_type=2", auth=ADMIN).json()
+        self.assertEqual(s["grid"], {"columns": 15, "rows": 12, "tile_size": 32})
+        self.assertEqual(len(s["palette"]), 12)
+        its = {i["iteration"]: i["filled_tiles"] for i in s["iterations"]}
+        self.assertEqual(its[0], 180)
+        self.assertGreaterEqual(its[sq["iteration"]], 1)
+        it = self.client.get(
+            "/api/admin/visualizer/iteration?game_type=2&iteration=" + str(sq["iteration"]),
+            auth=ADMIN).json()
+        mine = [t for t in it["tiles"] if (t["x"], t["y"]) == (sq["x"], sq["y"])]
+        self.assertEqual((mine[0]["pixels"], mine[0]["username"]), ("3" * 1024, "Painter"))
+        orig = self.client.get(
+            "/api/admin/visualizer/iteration?game_type=2&iteration=0", auth=ADMIN).json()
+        self.assertEqual(len(orig["tiles"]), 180)
+        self.assertEqual(self.client.get(
+            "/api/admin/visualizer?game_type=3", auth=ADMIN).status_code, 400)
 
     # ---- admin auth --------------------------------------------------------
 
@@ -322,7 +487,7 @@ class ApiTests(unittest.TestCase):
             set(tables),
             {"health", "users_requests", "admin_requests", "users",
              "submitted_for_type_one", "submitted_for_type_two",
-             "tile_holds", "game_state"},
+             "tile_holds", "game_state", "suspicious_events", "banned_ips"},
         )
         for t in tables.values():
             self.assertIn("created_at", [c["name"] for c in t["columns"]])

@@ -193,6 +193,30 @@ class TileHold(TimestampMixin, Base):
     )
 
 
+class SuspiciousEvent(TimestampMixin, Base):
+    """Suspicious activity shown on the admin dashboard (see security.py)."""
+
+    __tablename__ = "suspicious_events"
+
+    id = Column(Integer, primary_key=True)
+    event_type = Column(String, nullable=False, index=True)
+    severity = Column(String, nullable=False, default="warning")  # info/warning/critical
+    client_ip = Column(String, index=True)
+    # Not a foreign key: deleting a user must not erase the evidence.
+    user_id = Column(Integer, index=True)
+    details = Column(Text)  # JSON object
+
+
+class BannedIp(TimestampMixin, Base):
+    """IPs refused by the middleware for every non-admin /api request."""
+
+    __tablename__ = "banned_ips"
+
+    id = Column(Integer, primary_key=True)
+    ip = Column(String, nullable=False, unique=True)
+    reason = Column(String)
+
+
 class GameState(TimestampMixin, Base):
     """Per game type: bumped whenever a submission changes visible state."""
 

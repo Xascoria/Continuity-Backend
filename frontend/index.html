@@ -32,6 +32,8 @@
     <nav class="tabs">
       <button class="tab active" data-tab="health">Health</button>
       <button class="tab" data-tab="database">Database</button>
+      <button class="tab" data-tab="suspicious">Suspicious events</button>
+      <button class="tab" data-tab="visualizer">Visualizer</button>
     </nav>
 
     <main class="container">
@@ -72,12 +74,65 @@
           </div>
         </div>
       </section>
+      <section id="tab-visualizer" class="tab-panel" hidden>
+        <div class="card">
+          <h2>Visualizer</h2>
+          <p class="muted small">Iteration 0 is the original image. Every other iteration shows the tiles submitted for it; tiles nobody has submitted yet are hatched. Hover a tile for details.</p>
+          <div class="toolbar">
+            <label>Game mode
+              <select id="viz-mode"><option value="1">1</option><option value="2">2</option></select>
+            </label>
+            <label>Scale
+              <select id="viz-scale"><option value="1">1x</option><option value="2" selected>2x</option></select>
+            </label>
+            <button id="viz-refresh" class="secondary">Refresh</button>
+            <span id="viz-info" class="muted"></span>
+          </div>
+          <p id="viz-error" class="error" hidden></p>
+          <div id="viz-grid"></div>
+        </div>
+      </section>
+
+      <section id="tab-suspicious" class="tab-panel" hidden>
+        <div class="card">
+          <h2>Suspicious events</h2>
+          <p class="muted small">Last 24 hours by type (click to filter). Times are shown in your local time.</p>
+          <div id="sus-summary"></div>
+          <div class="toolbar">
+            <label>Type <select id="sus-type"><option value="">all</option></select></label>
+            <label>Severity
+              <select id="sus-severity">
+                <option value="">all</option><option>info</option><option>warning</option><option>critical</option>
+              </select>
+            </label>
+            <label>IP <input type="text" id="sus-ip" size="14"></label>
+            <label>User id <input type="text" id="sus-user" size="6"></label>
+            <button id="sus-refresh" class="secondary">Refresh</button>
+            <label><input type="checkbox" id="sus-auto"> auto-refresh</label>
+            <span id="sus-info" class="muted"></span>
+            <span class="spacer"></span>
+            <button id="sus-prev" class="secondary">&laquo; Prev</button>
+            <button id="sus-next" class="secondary">Next &raquo;</button>
+          </div>
+          <p id="sus-error" class="error" hidden></p>
+          <div class="table-wrap">
+            <table id="sus-table">
+              <thead>
+                <tr><th>ID</th><th>Time</th><th>Type</th><th>Severity</th><th>IP</th><th>User</th><th>Details</th><th>Actions</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="js/app.js"></script>
   <script src="js/database.js"></script>
+  <script src="js/suspicious.js"></script>
+  <script src="js/visualizer.js"></script>
   <script>Admin.start();</script>
 </body>
 </html>

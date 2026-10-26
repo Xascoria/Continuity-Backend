@@ -1,12 +1,14 @@
-from datetime import datetime
-from typing import Any, Dict, List
+import json
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, DateTime, Float, Integer, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import game, models, schemas, security
 from ..auth import require_admin
 from ..database import Base, get_db
 
@@ -45,6 +47,174 @@ def health_history(limit: int = 10, db: Session = Depends(get_db)):
         .limit(max(1, min(limit, 100)))
         .all()
     )
+
+
+# ---- suspicious events -----------------------------------------------------
+
+
+@router.get("/suspicious_events")
+def suspicious_events(
+    limit: int = 50,
+    offset: int = 0,
+    event_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    client_ip: Optional[str] = None,
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """Newest first, with optional filters, plus per-type counts for the last 24h."""
+    E = models.SuspiciousEvent
+    query = db.query(E)
+    for column, value in ((E.event_type, event_type), (E.severity, severity),
+                          (E.client_ip, client_ip), (E.user_id, user_id)):
+        if value not in (None, ""):
+            query = query.filter(column == value)
+    limit = max(1, min(limit, MAX_PAGE_SIZE))
+    since = models.utcnow() - timedelta(hours=24)
+    summary = dict(
+        db.query(E.event_type, func.count()).filter(E.created_at >= since)
+        .group_by(E.event_type).all()
+    )
+    rows = query.order_by(E.id.desc()).limit(limit).offset(max(offset, 0)).all()
+    banned_users = {
+        uid for (uid,) in db.query(models.User.user_id).filter(
+            models.User.user_id.in_({r.user_id for r in rows if r.user_id is not None}),
+            models.User.banned_at.isnot(None))
+    }
+    known_users = {
+        uid for (uid,) in db.query(models.User.user_id).filter(
+            models.User.user_id.in_({r.user_id for r in rows if r.user_id is not None}))
+    }
+    banned_ips = {
+        ip for (ip,) in db.query(models.BannedIp.ip).filter(
+            models.BannedIp.ip.in_({r.client_ip for r in rows if r.client_ip}))
+    }
+    return {
+        "total": query.count(),
+        "limit": limit,
+        "offset": max(offset, 0),
+        "last_24h": summary,
+        "events": [
+            {
+                "id": r.id,
+                "created_at": r.created_at.isoformat(),
+                "event_type": r.event_type,
+                "severity": r.severity,
+                "client_ip": r.client_ip,
+                "user_id": r.user_id,
+                "details": json.loads(r.details or "{}"),
+                # None = not applicable (no user / no ip, or the user was deleted)
+                "user_banned": (r.user_id in banned_users) if r.user_id in known_users else None,
+                "ip_banned": (r.client_ip in banned_ips) if r.client_ip else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ---- visualizer ---------------------------------------------------------
+
+
+@router.get("/visualizer")
+def visualizer_summary(game_type: int, db: Session = Depends(get_db)):
+    """Iterations of a game type with their filled tile counts (iteration 0 = original)."""
+    model = models.SUBMISSION_MODELS.get(game_type)
+    if model is None:
+        raise HTTPException(status_code=400, detail="game_type must be 1 or 2")
+    counts = dict(
+        db.query(model.iteration, func.count())
+        .filter(model.x.isnot(None), model.y.isnot(None))
+        .group_by(model.iteration).all()
+    )
+    iterations = [{"iteration": 0, "filled_tiles": game.TOTAL_TILES}] + [
+        {"iteration": it, "filled_tiles": n} for it, n in sorted(counts.items()) if it > 0
+    ]
+    return {
+        "game_type": game_type,
+        "palette": dict(zip(game.PALETTE, game.PALETTE_HEX)),
+        "grid": {"columns": game.GRID_COLUMNS, "rows": game.GRID_ROWS,
+                 "tile_size": game.TILE_SIZE},
+        "total_tiles": game.TOTAL_TILES,
+        "iterations": iterations,
+    }
+
+
+@router.get("/visualizer/iteration")
+def visualizer_iteration(game_type: int, iteration: int, db: Session = Depends(get_db)):
+    """All settled tiles of one iteration (iteration 0 = the original image)."""
+    model = models.SUBMISSION_MODELS.get(game_type)
+    if model is None or iteration < 0:
+        raise HTTPException(status_code=400, detail="invalid game_type or iteration")
+    if iteration == 0:
+        tiles = [
+            {"x": x, "y": y, "pixels": game.original_tile(x, y), "username": None,
+             "accuracy": None}
+            for y in range(game.GRID_ROWS) for x in range(game.GRID_COLUMNS)
+        ]
+    else:
+        rows = (
+            db.query(model.x, model.y, model.submitted_string, model.accuracy,
+                     models.User.username)
+            .join(models.User, models.User.user_id == model.user_id)
+            .filter(model.iteration == iteration, model.x.isnot(None))
+            .all()
+        )
+        tiles = [{"x": x, "y": y, "pixels": p, "accuracy": a, "username": u}
+                 for x, y, p, a, u in rows]
+    return {"game_type": game_type, "iteration": iteration, "tiles": tiles}
+
+
+# ---- bans ------------------------------------------------------------------
+
+
+def _get_user(db: Session, user_id: int) -> models.User:
+    user = db.get(models.User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+@router.post("/users/{user_id}/ban")
+def ban_user(user_id: int, db: Session = Depends(get_db)):
+    """Ban a user token: it gets USER_BANNED on every user endpoint."""
+    user = _get_user(db, user_id)
+    if user.banned_at is None:
+        user.banned_at = models.utcnow()
+    db.query(models.TileHold).filter(models.TileHold.user_id == user_id).delete()
+    db.commit()
+    return {"success": True, "user_id": user_id, "banned": True}
+
+
+@router.post("/users/{user_id}/unban")
+def unban_user(user_id: int, db: Session = Depends(get_db)):
+    user = _get_user(db, user_id)
+    user.banned_at = None
+    db.commit()
+    return {"success": True, "user_id": user_id, "banned": False}
+
+
+class IpIn(BaseModel):
+    ip: str = Field(min_length=1, max_length=64)
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+@router.post("/ban_ip")
+def ban_ip(body: IpIn, db: Session = Depends(get_db)):
+    """Refuse every non-admin /api request from this IP (HTTP 403 IP_BANNED)."""
+    ip = body.ip.strip()
+    if not db.query(models.BannedIp.id).filter(models.BannedIp.ip == ip).first():
+        db.add(models.BannedIp(ip=ip, reason=body.reason))
+        db.commit()
+    security.ip_bans.invalidate()
+    return {"success": True, "ip": ip, "banned": True}
+
+
+@router.post("/unban_ip")
+def unban_ip(body: IpIn, db: Session = Depends(get_db)):
+    db.query(models.BannedIp).filter(models.BannedIp.ip == body.ip.strip()).delete()
+    db.commit()
+    security.ip_bans.invalidate()
+    return {"success": True, "ip": body.ip.strip(), "banned": False}
 
 
 # ---- generic table editor --------------------------------------------------

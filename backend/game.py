@@ -17,22 +17,25 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, security
 from .config import ORIGINAL_IMAGE_FILE
 from .models import utcnow
 
 # ---- constants (section 2) --------------------------------------------------
 
-GRID_COLUMNS = 30
-GRID_ROWS = 24
+GRID_COLUMNS = 15
+GRID_ROWS = 12
 TILE_SIZE = 32
 TILE_PIXELS = TILE_SIZE * TILE_SIZE  # 1024
-TOTAL_TILES = GRID_COLUMNS * GRID_ROWS  # 720
-IMAGE_WIDTH = GRID_COLUMNS * TILE_SIZE  # 960
-IMAGE_HEIGHT = GRID_ROWS * TILE_SIZE  # 768
+TOTAL_TILES = GRID_COLUMNS * GRID_ROWS  # 180
+IMAGE_WIDTH = GRID_COLUMNS * TILE_SIZE  # 480
+IMAGE_HEIGHT = GRID_ROWS * TILE_SIZE  # 384
 WINDOW_SIZE = 64
 
 PALETTE = "123456789abc"  # 12 colour symbols
+# Hex colours for symbols 1-9, a-c (client rendering and the admin visualizer only).
+PALETTE_HEX = ["#cdd4d0", "#87a2bf", "#2f4f93", "#0e2948", "#85934e", "#5a732b",
+               "#27412d", "#0e1612", "#c4b257", "#ba9511", "#6c392c", "#2b1f12"]
 UNPAINTED = "."
 FILL = "1"
 ALPHABET = frozenset(PALETTE + UNPAINTED)
@@ -67,10 +70,12 @@ ERROR_STATUS = {
 
 
 class GameError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, user_id=None, logged: bool = False):
         super().__init__(code)
         self.code = code
         self.status = ERROR_STATUS.get(code, 400)
+        self.user_id = user_id
+        self.logged = logged  # already recorded as a suspicious event
 
 
 _LOCK = threading.RLock()
@@ -81,7 +86,7 @@ _original_rows: Optional[List[str]] = None
 
 
 def _load_original() -> Optional[List[str]]:
-    """image/original.txt: 768 lines of 960 palette symbols. Missing -> blank."""
+    """image/original.txt: 384 lines of 480 palette symbols. Missing -> blank."""
     try:
         text = ORIGINAL_IMAGE_FILE.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
@@ -287,7 +292,8 @@ def build_level(db: Session, model, game_type: int, iteration: int, x: int, y: i
 # ---- request_square ------------------------------------------------------------
 
 
-def request_square(db: Session, user: models.User, game_type: int) -> dict:
+def request_square(db: Session, user: models.User, game_type: int,
+                   client_ip: Optional[str] = None) -> dict:
     model = models.SUBMISSION_MODELS[game_type]
     with _LOCK:
         for _attempt in range(3):
@@ -309,7 +315,10 @@ def request_square(db: Session, user: models.User, game_type: int) -> dict:
                     models.TileHold.user_id == user.user_id
                 ).delete()
                 db.commit()
-                raise GameError("USER_BANNED")
+                security.log_event(
+                    "AUTO_BAN", security.CRITICAL, client_ip, user.user_id,
+                    {"active_holds": active, "limit": HOLD_LIMIT, "game_type": game_type})
+                raise GameError("USER_BANNED", user.user_id, logged=True)
 
             counts = _accepted_counts(db, model)
             top = _highest_known_iteration(db, model, game_type)
@@ -366,8 +375,9 @@ def _bump_state_version(db: Session, game_type: int) -> None:
         state.state_version += 1
 
 
-def submit_result(db: Session, user: models.User, *, game_type, x, y, canvas,
-                  time_taken, iteration, submission_id) -> dict:
+def _submit_result(db: Session, user: models.User, *, game_type, x, y, canvas,
+                  time_taken, iteration, submission_id,
+                  client_ip: Optional[str] = None) -> dict:
     submission_id = validate_submission_id(submission_id)
     validate_game_type(game_type)
     model = models.SUBMISSION_MODELS[game_type]
@@ -427,6 +437,15 @@ def submit_result(db: Session, user: models.User, *, game_type, x, y, canvas,
         matching = sum(a == b for a, b in zip(normalized, reference))
         accuracy = matching / TILE_PIXELS
 
+        # Most recent earlier submission of this user (either game type), for
+        # the fast-submission check below.
+        previous = max(
+            (t for t in (
+                db.query(func.max(m.created_at)).filter(m.user_id == user.user_id).scalar()
+                for m in models.SUBMISSION_MODELS.values()) if t is not None),
+            default=None,
+        )
+
         # 9. persist
         submission = model(
             user_id=user.user_id, submitted_string=normalized, accuracy=accuracy,
@@ -442,7 +461,31 @@ def submit_result(db: Session, user: models.User, *, game_type, x, y, canvas,
         except IntegrityError:
             db.rollback()
             raise GameError("TILE_ALREADY_SUBMITTED")
+
+        # Suspicious-activity checks (logged only; the submission is accepted).
+        if previous is not None:
+            gap = (submission.created_at - previous).total_seconds()
+            if gap < security.FAST_SUBMIT_SECONDS:
+                security.log_event(
+                    "FAST_SUBMISSIONS", security.WARNING, client_ip, user.user_id,
+                    {"seconds_since_previous": round(gap, 2), "game_type": game_type,
+                     "iteration": iteration, "x": x, "y": y},
+                    cooldown_key=(user.user_id,), cooldown=10)
+        if time_taken < security.MIN_PLAUSIBLE_TIME_TAKEN:
+            security.log_event(
+                "IMPOSSIBLE_TIME_TAKEN", security.WARNING, client_ip, user.user_id,
+                {"time_taken": time_taken, "game_type": game_type},
+                cooldown_key=(user.user_id,), cooldown=10)
         return _replay_response(submission)
+
+
+def submit_result(db: Session, user: models.User, **kwargs) -> dict:
+    try:
+        return _submit_result(db, user, **kwargs)
+    except GameError as e:
+        if e.user_id is None:
+            e.user_id = user.user_id
+        raise
 
 
 # ---- request_leaderboard ----------------------------------------------------------

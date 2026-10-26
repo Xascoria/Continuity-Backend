@@ -5,7 +5,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, security
 from .config import ADMIN_PASSWORD, ADMIN_USERNAME
 from .database import get_db
 
@@ -26,13 +26,23 @@ def _credentials_ok(credentials: Optional[HTTPBasicCredentials]) -> bool:
     return user_ok and pass_ok
 
 
-def require_admin(credentials: Optional[HTTPBasicCredentials] = Depends(_basic)):
+def _report_admin_failure(request: Request) -> None:
+    ip = request.client.host if request.client else "?"
+    security.log_events(security.monitor.check_admin_login_failure(ip), ip)
+
+
+def require_admin(
+    request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
+):
     if not _credentials_ok(credentials):
+        # Only attempts that actually carried (wrong) credentials count.
+        if credentials is not None:
+            _report_admin_failure(request)
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
 
 def require_admin_browser(
-    credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
+    request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
 ):
     """Same check, but asks the browser to show its native login prompt.
 
@@ -40,6 +50,8 @@ def require_admin_browser(
     uses require_admin so it keeps its own login form.
     """
     if not _credentials_ok(credentials):
+        if credentials is not None:
+            _report_admin_failure(request)
         raise HTTPException(
             status_code=401,
             detail="Admin login required",

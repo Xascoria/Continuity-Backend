@@ -12,7 +12,9 @@ import re
 import time
 
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
+from . import security
 from .database import SessionLocal
 from .models import AdminRequest, UsersRequest
 
@@ -116,6 +118,13 @@ def _write_log(scope, request_body, status, response_body, duration_ms):
         db.close()
 
 
+async def _reject_banned_ip(scope, receive, send):
+    """403 for a banned IP. Not logged: a banned client could flood the tables."""
+    await JSONResponse(
+        {"success": False, "error": "IP_BANNED"}, status_code=403
+    )(scope, receive, send)
+
+
 class RequestLogMiddleware:
     def __init__(self, app):
         self.app = app
@@ -124,6 +133,24 @@ class RequestLogMiddleware:
         if scope["type"] != "http" or not scope["path"].startswith("/api"):
             await self.app(scope, receive, send)
             return
+
+        if not _is_admin_path(scope["path"]):
+            client = scope.get("client")
+            ip = client[0] if client else "?"
+            try:
+                if security.ip_bans.stale():
+                    await run_in_threadpool(security.ip_bans.refresh)
+                if security.ip_bans.is_banned(ip):
+                    await _reject_banned_ip(scope, receive, send)
+                    return
+            except Exception:
+                logger.exception("IP ban check failed")
+            try:
+                events = security.monitor.check_request(ip, scope["path"])
+                if events:
+                    await run_in_threadpool(security.log_events, events, ip)
+            except Exception:
+                logger.exception("Traffic check failed")
 
         started = time.perf_counter()
         req, resp = _Capture(), _Capture()

@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .. import game, models, schemas
+from .. import game, models, schemas, security
 from ..auth import find_user
 from ..database import get_db
 from ..word_scanner import is_acceptable
@@ -17,7 +17,14 @@ router = APIRouter(prefix="/api/user", tags=["user"])
 TILE_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
-def _fail(out_cls, error: game.GameError) -> JSONResponse:
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "?"
+
+
+def _fail(out_cls, error: game.GameError, request: Request) -> JSONResponse:
+    if not error.logged:
+        security.report_game_error(
+            error.code, _client_ip(request), error.user_id, request.url.path)
     return JSONResponse(
         out_cls(success=False, error=error.code).model_dump(), status_code=error.status
     )
@@ -29,7 +36,7 @@ def _authenticate(db: Session, request: Request, token: str) -> models.User:
     if user is None:
         raise game.GameError("INVALID_TOKEN")
     if game.user_is_banned(user):
-        raise game.GameError("USER_BANNED")
+        raise game.GameError("USER_BANNED", user.user_id)
     return user
 
 
@@ -67,9 +74,9 @@ def request_square(
     try:
         user = _authenticate(db, request, body.token)
         game_type = game.validate_game_type(body.game_type)
-        result = game.request_square(db, user, game_type)
+        result = game.request_square(db, user, game_type, _client_ip(request))
     except game.GameError as e:
-        return _fail(schemas.SquareOut, e)
+        return _fail(schemas.SquareOut, e, request)
     return schemas.SquareOut(success=True, **result)
 
 
@@ -83,9 +90,10 @@ def submit_result(
             db, user, game_type=body.game_type, x=body.x, y=body.y,
             canvas=body.canvas, time_taken=body.time_taken,
             iteration=body.iteration, submission_id=body.submission_id,
+            client_ip=_client_ip(request),
         )
     except game.GameError as e:
-        return _fail(schemas.SubmitOut, e)
+        return _fail(schemas.SubmitOut, e, request)
     return schemas.SubmitOut(success=True, game_type=body.game_type, **result)
 
 
@@ -98,7 +106,7 @@ def request_leaderboard(
         game_type = game.validate_game_type(body.game_type)
         result = game.leaderboard(db, user, game_type)
     except game.GameError as e:
-        return _fail(schemas.LeaderboardOut, e)
+        return _fail(schemas.LeaderboardOut, e, request)
     return schemas.LeaderboardOut(success=True, **result)
 
 
@@ -111,7 +119,7 @@ def fetch_current_progress(
         game_type = game.validate_game_type(body.game_type)
         result = game.progress(db, user, game_type)
     except game.GameError as e:
-        return _fail(schemas.ProgressOut, e)
+        return _fail(schemas.ProgressOut, e, request)
     return schemas.ProgressOut(success=True, **result)
 
 
@@ -124,7 +132,7 @@ def fetch_tiles(
         game_type = game.validate_game_type(body.game_type)
         result = game.fetch_tiles(db, game_type, [t.model_dump() for t in body.tiles])
     except game.GameError as e:
-        return _fail(schemas.FetchTilesOut, e)
+        return _fail(schemas.FetchTilesOut, e, request)
     return JSONResponse(
         schemas.FetchTilesOut(success=True, **result).model_dump(),
         headers=TILE_CACHE_HEADERS,

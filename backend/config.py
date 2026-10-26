@@ -15,7 +15,7 @@ ADMIN_SECRET_FILE = Path(
 
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
-# Original image (iteration 0): 768 lines of 960 palette symbols. If absent,
+# Original image (iteration 0): 384 lines of 480 palette symbols. If absent,
 # iteration 0 is a blank image.
 ORIGINAL_IMAGE_FILE = Path(
     os.environ.get("ORIGINAL_IMAGE_FILE", ROOT_DIR / "image" / "original.txt")
