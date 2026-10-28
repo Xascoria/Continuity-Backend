@@ -478,6 +478,31 @@ class ApiTests(unittest.TestCase):
     def test_frontend_is_served(self):
         self.assertEqual(self.client.get("/").status_code, 200)
 
+    def test_itch_preflight_is_allowed(self):
+        # Godot's web export posts JSON, so the browser sends this preflight
+        # from the itch.io game origin before any API call.
+        r = self.client.options(
+            "/api/user/register",
+            headers={
+                "Origin": "https://html-classic.itch.zone",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.headers["access-control-allow-origin"], "*")
+        self.assertIn("content-type", r.headers["access-control-allow-headers"].lower())
+        self.assertIn("POST", r.headers["access-control-allow-methods"])
+
+        posted = self.client.post(
+            "/api/user/register",
+            json={"username": "Itch Player"},
+            headers={"Origin": "https://html-classic.itch.zone"},
+        )
+        self.assertEqual(posted.status_code, 200, posted.text)
+        self.assertEqual(posted.headers["access-control-allow-origin"], "*")
+        self.assertTrue(posted.json()["success"])
+
     # ---- admin table editor -------------------------------------------------
 
     def test_list_tables(self):

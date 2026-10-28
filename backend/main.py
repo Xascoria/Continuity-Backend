@@ -1,4 +1,5 @@
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +19,15 @@ app = FastAPI(
     title="20Seconds API", docs_url=None, redoc_url=None, openapi_url=None
 )
 app.add_middleware(RequestLogMiddleware)
+# The itch.io web build calls this API from another origin. application/json
+# makes the browser preflight with OPTIONS, which must succeed before the POST.
+# Added last so it runs first and answers the preflight itself.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_admin_browser)])
