@@ -65,6 +65,7 @@ ERROR_STATUS = {
     "HOLD_EXPIRED": 410,
     "SUBMISSION_ID_REUSED": 409,
     "TILE_ALREADY_SUBMITTED": 409,
+    "NO_SUBMISSION": 404,  # /api/user/health when game type 1 has no submissions
     "INTERNAL_ERROR": 500,
 }
 

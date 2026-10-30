@@ -75,7 +75,7 @@ class User(TimestampMixin, Base):
     __tablename__ = "users"
 
     user_id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String(25), nullable=False)
+    username = Column(String(12), nullable=False)
     uuid = Column(String(36), nullable=False, unique=True, index=True)
     registered_at = Column(DateTime, nullable=False, default=utcnow)
     # Set when the user is banned (hold limit exceeded); NULL otherwise.

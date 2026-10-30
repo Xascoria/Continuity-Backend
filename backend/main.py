@@ -46,7 +46,8 @@ def redoc_ui():
 
 
 
-# Every /api route requires auth, except POST /api/user/register.
+# Every /api route requires auth, except POST /api/user/register and
+# POST /api/user/health (token optional; empty token is anonymous).
 app.include_router(user.router)
 app.include_router(admin.router)
 

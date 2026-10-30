@@ -9,7 +9,7 @@ ALLOWED_CHARS = frozenset(
     string.digits + string.ascii_letters + string.punctuation + " "
 )
 MIN_LENGTH = 3
-MAX_LENGTH = 25
+MAX_LENGTH = 12
 
 # Characters people commonly slip between letters to dodge filters
 # (e.g. "d.i.g.g.e.r", "d_i_g_g_e_r", "d-i-g-g-e-r"). Whitespace is always
@@ -84,7 +84,7 @@ def is_acceptable(text: str) -> bool:
 
     Rules:
       1. Only digits, ASCII letters, punctuation and spaces are allowed.
-      2. Length must be between 3 and 25 characters (inclusive).
+      2. Length must be between 3 and 12 characters (inclusive).
       3. Must not contain any word from words.json, ignoring case, whitespace,
          common separators (SEPARATORS) and leetspeak (LEET_MAP), e.g.
          "D I G G E R", "d.i.g.g.e.r" and "d1gg3r" are all rejected if

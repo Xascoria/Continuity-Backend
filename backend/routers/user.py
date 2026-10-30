@@ -67,6 +67,44 @@ def register(body: schemas.RegisterIn, db: Session = Depends(get_db)):
     return schemas.RegisterOut(success=True, token=user.uuid)
 
 
+@router.post("/health", response_model=schemas.UserHealthOut)
+def user_health(
+    body: schemas.UserHealthIn, request: Request, db: Session = Depends(get_db)
+):
+    """Random accepted game-type-1 square, plus who submitted it and when.
+
+    `token` may be empty. A non-empty token is checked like the other user
+    endpoints. Repeated anonymous calls from one IP are logged
+    (ANONYMOUS_HEALTH_PING) but still answered.
+    """
+    token = body.token.strip()
+    if token:
+        try:
+            _authenticate(db, request, token)
+        except game.GameError as e:
+            return _fail(schemas.UserHealthOut, e, request)
+    else:
+        ip = _client_ip(request)
+        security.log_events(security.monitor.check_anonymous_health(ip), ip)
+
+    picked = (
+        db.query(
+            models.SubmittedForTypeOne.submitted_string,
+            models.SubmittedForTypeOne.created_at,
+            models.User.username,
+        )
+        .join(models.User, models.User.user_id == models.SubmittedForTypeOne.user_id)
+        .order_by(func.random())
+        .first()
+    )
+    if picked is None:
+        return _fail(schemas.UserHealthOut, game.GameError("NO_SUBMISSION"), request)
+    square, created_at, username = picked
+    return schemas.UserHealthOut(
+        success=True, square=square, username=username, year=created_at.year
+    )
+
+
 @router.post("/request_square", response_model=schemas.SquareOut)
 def request_square(
     body: schemas.SquareIn, request: Request, db: Session = Depends(get_db)

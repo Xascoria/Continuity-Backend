@@ -23,6 +23,20 @@ class RegisterIn(BaseModel):
     username: str
 
 
+class UserHealthIn(BaseModel):
+    """Player token. Empty string (the default) calls the check anonymously."""
+
+    token: str = ""
+
+
+class UserHealthOut(BaseModel):
+    success: bool
+    square: Optional[str] = None  # normalized 1024-char canvas, game type 1
+    username: Optional[str] = None
+    year: Optional[int] = None  # UTC year of that submission's created_at
+    error: Optional[str] = None
+
+
 class RegisterOut(BaseModel):
     success: bool
     token: Optional[str] = None

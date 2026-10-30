@@ -10,6 +10,7 @@ RATE_LIMIT_EXCEEDED     one IP sent too many /api requests in a short window
 TRAFFIC_SPIKE           total /api traffic is abnormally high (generic DDoS)
 REGISTER_FLOOD          repeated register attempts from one IP (success or fail)
 INVALID_TOKEN_PROBING   one IP keeps sending unknown tokens
+ANONYMOUS_HEALTH_PING   one IP keeps calling /api/user/health with no user token
 ADMIN_LOGIN_BRUTEFORCE  repeated failed admin logins from one IP
 FAST_SUBMISSIONS        a user submitted twice (any game type) within 20 seconds
 IMPOSSIBLE_TIME_TAKEN   reported time_taken is implausibly low
@@ -39,6 +40,9 @@ GLOBAL_RATE = (1500, 10)     # requests across all IPs
 REGISTER_RATE = (5, 600)     # register attempts per IP
 INVALID_TOKEN_RATE = (20, 60)
 ADMIN_LOGIN_RATE = (5, 60)
+# Health checks with a real token are normal. The same IP hammering the
+# endpoint with an empty token is not.
+ANONYMOUS_HEALTH_RATE = (10, 60)
 
 FAST_SUBMIT_SECONDS = 20
 MIN_PLAUSIBLE_TIME_TAKEN = 1.0  # seconds
@@ -70,7 +74,8 @@ class Monitor:
 
     def _prune(self, now: float) -> None:
         longest = max(w for _, w in (IP_RATE, GLOBAL_RATE, REGISTER_RATE,
-                                     INVALID_TOKEN_RATE, ADMIN_LOGIN_RATE))
+                                     INVALID_TOKEN_RATE, ADMIN_LOGIN_RATE,
+                                     ANONYMOUS_HEALTH_RATE))
         for k in [k for k, q in self._hits.items() if not q or now - q[-1] > longest]:
             del self._hits[k]
         for k in [k for k, t in self._last_logged.items() if now - t > 3600]:
@@ -116,6 +121,19 @@ class Monitor:
         if hot and self.cooldown_ok(("INVALID_TOKEN_PROBING", ip), COOLDOWN_SECONDS, now):
             return [("INVALID_TOKEN_PROBING", WARNING,
                      {"limit": INVALID_TOKEN_RATE[0], "window_seconds": INVALID_TOKEN_RATE[1]})]
+        return []
+
+    def check_anonymous_health(self, ip: str, now: Optional[float] = None) -> List[Event]:
+        """Anonymous /api/user/health calls. A sustained burst from one IP is logged."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            hot = self._burst(("anon_health", ip), ANONYMOUS_HEALTH_RATE, now)
+        if hot and self.cooldown_ok(("ANONYMOUS_HEALTH_PING", ip), COOLDOWN_SECONDS, now):
+            return [("ANONYMOUS_HEALTH_PING", WARNING, {
+                "limit": ANONYMOUS_HEALTH_RATE[0],
+                "window_seconds": ANONYMOUS_HEALTH_RATE[1],
+                "path": "/api/user/health",
+            })]
         return []
 
     def check_admin_login_failure(self, ip: str, now: Optional[float] = None) -> List[Event]:

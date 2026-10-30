@@ -43,7 +43,7 @@ users_requests.user_id  -> users.user_id   (logical link only, no foreign key)
 | Column | Type | Notes |
 |---|---|---|
 | `user_id` | INTEGER | Primary key, autoincrement. Ids of deleted users are never reused. |
-| `username` | VARCHAR(25) | Not null. Unique case-insensitively (`ix_users_username_lower` on `lower(username)`). |
+| `username` | VARCHAR(12) | Not null. Unique case-insensitively (`ix_users_username_lower` on `lower(username)`). |
 | `uuid` | VARCHAR(36) | Not null, unique. The user's token, issued at registration. |
 | `registered_at` | DATETIME | Not null, set at registration. |
 | `banned_at` | DATETIME | NULL unless banned (hold limit exceeded). Banned tokens get `USER_BANNED` on every user endpoint. Clear it to lift a ban. |
@@ -205,7 +205,7 @@ at the end of the table instead of before `created_at`.
 ```sql
 CREATE TABLE users (
 	user_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, 
-	username VARCHAR(25) NOT NULL, 
+	username VARCHAR(12) NOT NULL, 
 	uuid VARCHAR(36) NOT NULL, 
 	registered_at DATETIME NOT NULL, 
 	banned_at DATETIME, 

@@ -4,7 +4,7 @@ import re
 import tempfile
 import unittest
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Point the app at a throwaway DB and admin secret *before* importing it.
@@ -53,6 +53,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("taken", dup["error"])
 
         self.assertFalse(self.register("ab")["success"])  # too short
+        self.assertTrue(self.register("c" * 12)["success"])
+        self.assertFalse(self.register("d" * 13)["success"])  # over the 12-char cap
         self.assertFalse(self.register("s a n d n i g g e r")["success"])
 
     def test_user_endpoints_need_valid_token(self):
@@ -70,6 +72,65 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(r.status_code, 401, path)
             self.assertEqual(r.json()["error"], "INVALID_TOKEN")
             self.assertFalse(r.json()["success"], path)
+
+    def test_user_health(self):
+        with SessionLocal() as db:
+            db.query(models.SubmittedForTypeOne).delete()
+            db.commit()
+
+        token = self.register("HealthPing")["token"]
+        # A burst of real tokens is not an anonymous ping, even with nothing to return.
+        quiet = self.events(event_type="ANONYMOUS_HEALTH_PING")["total"]
+        for _ in range(security.ANONYMOUS_HEALTH_RATE[0] + 1):
+            miss = self.client.post("/api/user/health", json={"token": token})
+            self.assertEqual((miss.status_code, miss.json()["error"]), (404, "NO_SUBMISSION"))
+        self.assertEqual(self.events(event_type="ANONYMOUS_HEALTH_PING")["total"], quiet)
+
+        empty = self.client.post("/api/user/health", json={"token": ""})
+        self.assertEqual((empty.status_code, empty.json()["error"]), (404, "NO_SUBMISSION"))
+
+        sq = self.square(token, 1)
+        canvas = "4" * 1024
+        self.assertTrue(self.submit(token, sq, canvas).json()["success"])
+        sq2 = self.square(token, 2)
+        self.assertTrue(self.submit(token, sq2, "5" * 1024).json()["success"])
+        with SessionLocal() as db:
+            row = db.query(models.SubmittedForTypeOne).one()
+            row.created_at = datetime(2024, 3, 15, 12, 0, 0)
+            db.commit()
+
+        authed = self.client.post("/api/user/health", json={"token": token})
+        self.assertEqual(authed.status_code, 200, authed.text)
+        body = authed.json()
+        self.assertEqual(
+            (body["success"], body["square"], body["username"], body["year"], body["error"]),
+            (True, canvas, "HealthPing", 2024, None),
+        )
+
+        # Empty token, omitted token, and whitespace all proceed anonymously.
+        for payload in ({"token": ""}, {}, {"token": "   "}):
+            anon = self.client.post("/api/user/health", json=payload)
+            self.assertEqual(anon.status_code, 200, anon.text)
+            self.assertEqual(anon.json()["square"], canvas)
+
+        bad = self.client.post("/api/user/health", json={"token": "not-a-user"})
+        self.assertEqual((bad.status_code, bad.json()["error"]), (401, "INVALID_TOKEN"))
+
+        uid = next(u for u in self.admin_rows("users") if u["username"] == "HealthPing")["user_id"]
+        self.client.post(f"/api/admin/users/{uid}/ban", auth=ADMIN)
+        banned = self.client.post("/api/user/health", json={"token": token})
+        self.assertEqual((banned.status_code, banned.json()["error"]), (403, "USER_BANNED"))
+        # A ban does not hide that player's already accepted square from anonymous callers.
+        still = self.client.post("/api/user/health", json={"token": ""})
+        self.assertEqual(still.json()["username"], "HealthPing")
+
+        before = self.events(event_type="ANONYMOUS_HEALTH_PING")["total"]
+        for _ in range(security.ANONYMOUS_HEALTH_RATE[0] + 1):
+            ping = self.client.post("/api/user/health", json={"token": ""})
+            self.assertTrue(ping.json()["success"])
+        self.assertGreater(
+            self.events(event_type="ANONYMOUS_HEALTH_PING")["total"], before
+        )
 
     def square(self, token, gt=1):
         r = self.client.post("/api/user/request_square", json={"token": token, "game_type": gt})
@@ -188,7 +249,7 @@ class ApiTests(unittest.TestCase):
                 current.add(key)
 
         # A new request releases the user's previous hold of the same game type.
-        token = self.register("Slot Collector")["token"]
+        token = self.register("Collector")["token"]
         for _ in range(3):
             self.square(token, 1)
         with SessionLocal() as db:
@@ -299,9 +360,9 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/admin/suspicious_events").status_code, 401)
 
     def test_fast_submissions_and_auto_ban_are_logged(self):
-        token = self.register("Speedy Gonzales")["token"]
+        token = self.register("Speedy")["token"]
         uid = next(u for u in self.admin_rows("users")
-                   if u["username"] == "Speedy Gonzales")["user_id"]
+                   if u["username"] == "Speedy")["user_id"]
         # two submissions (different game types) back to back
         for gt in (1, 2):
             self.assertTrue(self.submit(token, self.square(token, gt)).json()["success"])
@@ -375,6 +436,15 @@ class ApiTests(unittest.TestCase):
             t[0] += 0.1
             out += m4.check_admin_login_failure("7.7.7.7")
         self.assertEqual([e[0] for e in out], ["ADMIN_LOGIN_BRUTEFORCE"])
+
+        # anonymous health pings from one IP; a different IP stays clean
+        m5 = security.Monitor(clock=lambda: t[0])
+        out = []
+        for _ in range(security.ANONYMOUS_HEALTH_RATE[0] + 1):
+            t[0] += 0.2
+            out += m5.check_anonymous_health("6.6.6.6")
+        self.assertEqual([e[0] for e in out], ["ANONYMOUS_HEALTH_PING"])
+        self.assertEqual(m5.check_anonymous_health("6.6.6.7"), [])
 
     def test_global_traffic_spike(self):
         t = [0.0]

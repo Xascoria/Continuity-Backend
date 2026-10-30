@@ -5,13 +5,14 @@ from .word_scanner import is_acceptable
 
 class WordScannerTests(unittest.TestCase):
     def test_clean_strings_pass(self):
-        for s in ["Player 42", "good morning", "abc", "a" * 25]:
+        for s in ["Player 42", "good morning", "abc", "a" * 12]:
             self.assertTrue(is_acceptable(s), s)
 
     def test_length_limits(self):
         self.assertFalse(is_acceptable("ab"))
         self.assertFalse(is_acceptable(""))
-        self.assertFalse(is_acceptable("a" * 26))
+        self.assertFalse(is_acceptable("a" * 13))
+        self.assertFalse(is_acceptable("a" * 25))
 
     def test_disallowed_characters(self):
         for s in ["caf\u00e9 time", "tab\there", "new\nline", "emoji \U0001F600 ok"]:
