@@ -91,6 +91,7 @@ def user_health(
         db.query(
             models.SubmittedForTypeOne.submitted_string,
             models.SubmittedForTypeOne.created_at,
+            models.SubmittedForTypeOne.accuracy,
             models.User.username,
         )
         .join(models.User, models.User.user_id == models.SubmittedForTypeOne.user_id)
@@ -99,9 +100,10 @@ def user_health(
     )
     if picked is None:
         return _fail(schemas.UserHealthOut, game.GameError("NO_SUBMISSION"), request)
-    square, created_at, username = picked
+    square, created_at, accuracy, username = picked
     return schemas.UserHealthOut(
-        success=True, square=square, username=username, year=created_at.year
+        success=True, square=square, username=username,
+        year=created_at.year, accuracy=accuracy,
     )
 
 

@@ -41,6 +41,7 @@ HTTP 200
   "square": "1111…(1024 characters)",
   "username": "Painter",
   "year": 2026,
+  "accuracy": 0.713,
   "error": null
 }
 ```
@@ -50,6 +51,7 @@ HTTP 200
 | `square` | One randomly chosen accepted submission from game type 1. Normalized canvas: exactly 1024 characters, row-major, 32×32. Alphabet is `1-9` and `a-c` (same palette as `fetch_tiles` / `backend_design.md` section 2.1). `.` is never present. |
 | `username` | Username of the player who submitted that square. |
 | `year` | Calendar year of that submission's timestamp, UTC. Taken from the stored timestamp (expected to be 2026 for current play, but it is not hardcoded). |
+| `accuracy` | That square's stored accuracy. Float ratio in `[0, 1]` (`matching_pixels / 1024` against the reference frozen on the hold). Not a percentage, and not averaged with the player's other submissions. |
 
 ## No submissions yet
 
@@ -61,6 +63,7 @@ HTTP 404, when game type 1 has no accepted squares:
   "square": null,
   "username": null,
   "year": null,
+  "accuracy": null,
   "error": "NO_SUBMISSION"
 }
 ```

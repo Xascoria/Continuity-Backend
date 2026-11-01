@@ -34,6 +34,7 @@ class UserHealthOut(BaseModel):
     square: Optional[str] = None  # normalized 1024-char canvas, game type 1
     username: Optional[str] = None
     year: Optional[int] = None  # UTC year of that submission's created_at
+    accuracy: Optional[float] = None  # that square's stored ratio, 0-1
     error: Optional[str] = None
 
 

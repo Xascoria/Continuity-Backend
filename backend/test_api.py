@@ -83,7 +83,10 @@ class ApiTests(unittest.TestCase):
         quiet = self.events(event_type="ANONYMOUS_HEALTH_PING")["total"]
         for _ in range(security.ANONYMOUS_HEALTH_RATE[0] + 1):
             miss = self.client.post("/api/user/health", json={"token": token})
-            self.assertEqual((miss.status_code, miss.json()["error"]), (404, "NO_SUBMISSION"))
+            self.assertEqual(
+                (miss.status_code, miss.json()["error"], miss.json()["accuracy"]),
+                (404, "NO_SUBMISSION", None),
+            )
         self.assertEqual(self.events(event_type="ANONYMOUS_HEALTH_PING")["total"], quiet)
 
         empty = self.client.post("/api/user/health", json={"token": ""})
@@ -91,7 +94,8 @@ class ApiTests(unittest.TestCase):
 
         sq = self.square(token, 1)
         canvas = "4" * 1024
-        self.assertTrue(self.submit(token, sq, canvas).json()["success"])
+        submitted = self.submit(token, sq, canvas).json()
+        self.assertTrue(submitted["success"])
         sq2 = self.square(token, 2)
         self.assertTrue(self.submit(token, sq2, "5" * 1024).json()["success"])
         with SessionLocal() as db:
@@ -106,6 +110,7 @@ class ApiTests(unittest.TestCase):
             (body["success"], body["square"], body["username"], body["year"], body["error"]),
             (True, canvas, "HealthPing", 2024, None),
         )
+        self.assertAlmostEqual(body["accuracy"], submitted["accuracy"])
 
         # Empty token, omitted token, and whitespace all proceed anonymously.
         for payload in ({"token": ""}, {}, {"token": "   "}):
