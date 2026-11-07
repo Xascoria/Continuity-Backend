@@ -1,1 +1,1 @@
-https://b1f7-2001-f40-962-44a1-242d-19f-b35c-d7bf.ngrok-free.app
+https://20seconds-api.fly.dev/
