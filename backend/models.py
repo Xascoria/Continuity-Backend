@@ -17,7 +17,7 @@ from .database import Base
 
 
 def utcnow() -> datetime:
-    """Naive UTC timestamp (SQLite does not store timezones)."""
+    """Naive UTC. SQLite has no timezone; Postgres stores these as TIMESTAMP."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 

@@ -1,8 +1,13 @@
+import os
 import unittest
+
+# Don't let a shell DATABASE_URL (Supabase) attach this process to Postgres.
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("DB_SCHEMA", None)
 
 from sqlalchemy import create_engine, inspect, text
 
-from .migrations import run_migrations
+from .migrations import column_ddl, run_migrations
 
 
 class MigrationTests(unittest.TestCase):
@@ -39,6 +44,19 @@ class MigrationTests(unittest.TestCase):
 
     def test_missing_tables_are_ignored(self):
         run_migrations(create_engine("sqlite://"))
+
+    def test_datetime_ddl_follows_the_dialect(self):
+        self.assertEqual(column_ddl(create_engine("sqlite://"), "DATETIME"), "DATETIME")
+
+        class Postgres:
+            class dialect:
+                name = "postgresql"
+
+        self.assertEqual(column_ddl(Postgres(), "DATETIME"), "TIMESTAMP")
+        self.assertEqual(
+            column_ddl(Postgres(), "INTEGER NOT NULL DEFAULT 0"),
+            "INTEGER NOT NULL DEFAULT 0",
+        )
 
 
 if __name__ == "__main__":

@@ -119,6 +119,40 @@ th { background: #f9fafb; white-space: nowrap; }
 
 #viz-grid { display: flex; flex-wrap: wrap; gap: 16px; }
 .viz-card { border: 1px solid #d1d5db; border-radius: 6px; padding: 8px; background: #fff; }
-.viz-card h3 { margin: 0 0 6px; font-size: 14px; }
+.viz-card h3 { margin: 0 0 2px; font-size: 14px; }
+.viz-card .viz-solid { margin: 0 0 6px; font-size: 13px; font-weight: 700; color: #be123c; }
 .viz-card canvas { display: block; image-rendering: pixelated; background: #e5e7eb; }
 .viz-card .viz-hover { min-height: 1.3em; font-size: 12px; color: #6b7280; margin-top: 4px; }
+
+#lb-table th.sortable { cursor: pointer; }
+#lb-table th.sortable:hover { background: #eef2ff; }
+#lb-table th.sort-active { color: #2563eb; }
+
+#act-table td.actions button { padding: 3px 8px; font-size: 0.8rem; }
+#act-table td { white-space: nowrap; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 24, 39, 0.55);
+  padding: 16px;
+}
+.modal-card {
+  background: #fff;
+  border-radius: 8px;
+  padding: 16px 20px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  max-width: 100%;
+}
+.modal-card h3 { margin: 0 0 12px; font-size: 1rem; }
+.modal-card canvas {
+  display: block;
+  image-rendering: pixelated;
+  background: #e5e7eb;
+  border: 1px solid #d1d5db;
+}
+.modal-card .modal-actions { margin-top: 12px; text-align: right; }

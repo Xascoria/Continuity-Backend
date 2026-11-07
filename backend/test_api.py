@@ -4,11 +4,18 @@ import re
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 
 # Point the app at a throwaway DB and admin secret *before* importing it.
+# Drop host Postgres / admin env so a shell prepared for Fly cannot hijack tests.
 _TMP = tempfile.mkdtemp()
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("ADMIN_USERNAME", None)
+os.environ.pop("ADMIN_PASSWORD", None)
+os.environ.pop("DB_SCHEMA", None)
+os.environ["LOG_ADMIN_REQUESTS"] = "1"
 os.environ["DB_PATH"] = str(Path(_TMP) / "test.db")
 os.environ["ADMIN_SECRET_FILE"] = str(Path(_TMP) / "admin.json")
 Path(os.environ["ADMIN_SECRET_FILE"]).write_text(
@@ -500,6 +507,50 @@ class ApiTests(unittest.TestCase):
             post("unban_ip", json={"ip": "testclient"})
         self.assertTrue(self.square(token, 1)["success"])
 
+    def test_admin_leaderboard_is_the_full_qualifying_list(self):
+        self.assertEqual(self.client.get("/api/admin/leaderboard?game_type=1").status_code, 401)
+        self.assertEqual(
+            self.client.get("/api/admin/leaderboard?game_type=3", auth=ADMIN).status_code, 400)
+        with SessionLocal() as db:
+            tokens = {}
+            for i in range(11):
+                user = models.User(username=f"Rank{i:02d}", uuid=str(uuid.uuid4()))
+                db.add(user)
+                db.flush()
+                tokens[i] = user.uuid
+                for _ in range(10):
+                    # No coordinates: counts on the leaderboard, ignored for tile state.
+                    db.add(models.SubmittedForTypeOne(
+                        user_id=user.user_id, submitted_string="2" * 1024,
+                        accuracy=0.5 + i / 100, iteration=0,
+                        submission_id=str(uuid.uuid4())))
+            short = models.User(username="RankLow", uuid=str(uuid.uuid4()))
+            db.add(short)
+            db.flush()
+            for _ in range(9):
+                db.add(models.SubmittedForTypeOne(
+                    user_id=short.user_id, submitted_string="2" * 1024,
+                    accuracy=1.0, iteration=0, submission_id=str(uuid.uuid4())))
+            db.commit()
+
+        board = self.client.get("/api/admin/leaderboard?game_type=1", auth=ADMIN).json()
+        self.assertEqual(board["minimum_contributions"], 10)
+        self.assertEqual(
+            [e["username"] for e in board["top_contributors"]],
+            [f"Rank{i:02d}" for i in range(11)])
+        self.assertEqual(
+            [e["username"] for e in board["top_accuracy"]],
+            [f"Rank{i:02d}" for i in range(10, -1, -1)])
+        self.assertEqual([e["rank"] for e in board["top_contributors"]], list(range(1, 12)))
+        self.assertNotIn("RankLow", [e["username"] for e in board["top_contributors"]])
+
+        # The game still returns only the top 10 to a player.
+        player = self.client.post("/api/user/request_leaderboard",
+                                  json={"token": tokens[0], "game_type": 1}).json()
+        shown = [e["username"] for e in player["top_contributors"]]
+        self.assertEqual(len(shown), 10)
+        self.assertNotIn("Rank10", shown)
+
     def test_visualizer(self):
         token = self.register("Painter")["token"]
         sq = self.square(token, 2)
@@ -516,11 +567,75 @@ class ApiTests(unittest.TestCase):
             auth=ADMIN).json()
         mine = [t for t in it["tiles"] if (t["x"], t["y"]) == (sq["x"], sq["y"])]
         self.assertEqual((mine[0]["pixels"], mine[0]["username"]), ("3" * 1024, "Painter"))
+        self.assertEqual(
+            it["single_color_tiles"],
+            sum(1 for t in it["tiles"] if len(set(t["pixels"])) == 1),
+        )
+        self.assertGreaterEqual(it["single_color_tiles"], 1)
         orig = self.client.get(
             "/api/admin/visualizer/iteration?game_type=2&iteration=0", auth=ADMIN).json()
         self.assertEqual(len(orig["tiles"]), 180)
+        self.assertEqual(
+            orig["single_color_tiles"],
+            sum(1 for t in orig["tiles"] if len(set(t["pixels"])) == 1),
+        )
         self.assertEqual(self.client.get(
             "/api/admin/visualizer?game_type=3", auth=ADMIN).status_code, 400)
+
+    def test_player_activities(self):
+        self.assertEqual(self.client.get("/api/admin/player_activities").status_code, 401)
+        token = self.register("ActLogger")["token"]
+        first = self.square(token, 1)
+        self.assertTrue(self.submit(token, first, "3" * 1024).json()["success"])
+        second = self.square(token, 1)
+        self.assertTrue(self.submit(token, second, "7" * 1024).json()["success"])
+
+        with SessionLocal() as db:
+            subs = (
+                db.query(models.SubmittedForTypeOne)
+                .join(models.User, models.User.user_id == models.SubmittedForTypeOne.user_id)
+                .filter(models.User.username == "ActLogger")
+                .order_by(models.SubmittedForTypeOne.id)
+                .all()
+            )
+            self.assertEqual(len(subs), 2)
+            # Later row id is the earlier submission, so the count follows time.
+            subs[0].created_at = datetime(2030, 5, 1, 2, 0, 0)  # MYT 10:00, 2nd so far
+            subs[1].created_at = datetime(2030, 5, 1, 1, 0, 0)  # MYT 09:00, 1st so far
+            db.commit()
+            expected = {}
+            for sub in subs:
+                db.refresh(sub)
+                self.assertIsNotNone(sub.reference_iteration)
+                expected[sub.id] = game.tile_pixels(
+                    db, models.SubmittedForTypeOne, sub.reference_iteration, sub.x, sub.y)
+
+        page = self.client.get(
+            "/api/admin/player_activities?limit=1&offset=0", auth=ADMIN).json()
+        self.assertEqual(page["limit"], 1)
+        self.assertGreaterEqual(page["total"], 2)
+        self.assertEqual(len(page["palette"]), 12)
+        top = page["activities"][0]
+        self.assertEqual(top["username"], "ActLogger")
+        self.assertEqual(top["submitted_time"], "2030-05-01 10:00:00")
+        self.assertEqual(top["submissions_so_far"], 2)
+        self.assertEqual(top["drawn_tile"], "3" * 1024)
+        self.assertEqual(top["source_tile"], expected[top["id"]])
+        self.assertEqual(len(top["source_tile"]), 1024)
+
+        listed = self.client.get(
+            "/api/admin/player_activities?limit=200", auth=ADMIN).json()["activities"]
+        mine = [a for a in listed if a["username"] == "ActLogger"]
+        self.assertEqual(
+            [(a["submitted_time"], a["submissions_so_far"], a["drawn_tile"]) for a in mine],
+            [
+                ("2030-05-01 10:00:00", 2, "3" * 1024),
+                ("2030-05-01 09:00:00", 1, "7" * 1024),
+            ],
+        )
+        for activity in mine:
+            self.assertEqual(activity["source_tile"], expected[activity["id"]])
+            self.assertEqual(activity["iteration"], second["iteration"])
 
     # ---- admin auth --------------------------------------------------------
 
@@ -691,6 +806,142 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(any(r["response_status"] == 401 for r in rows))
         for r in rows:
             self.assertTrue(r["path"].startswith("/api/admin"))
+
+    def test_admin_request_logging_can_be_turned_off(self):
+        from backend import config
+
+        probe = "probe=admin-log-off"
+        with patch.object(config, "LOG_ADMIN_REQUESTS", False):
+            logged_in = self.client.post(f"/api/admin/login?{probe}", auth=ADMIN)
+            self.assertEqual(logged_in.status_code, 200, logged_in.text)
+            created = self.register("LogFlag")
+            self.assertTrue(created["success"], created)
+        with SessionLocal() as db:
+            admin_hits = db.query(models.AdminRequest).filter(
+                models.AdminRequest.query_string == probe).count()
+            user_hits = db.query(models.UsersRequest).filter(
+                models.UsersRequest.path == "/api/user/register",
+                models.UsersRequest.request_body.contains("LogFlag"),
+            ).count()
+        self.assertEqual(admin_hits, 0)
+        self.assertEqual(user_hits, 1)
+
+    def test_env_flag_and_database_url_helpers(self):
+        from backend.config import env_flag
+        from backend.database import normalize_database_url, uses_transaction_pooler
+
+        name = "LOG_ADMIN_REQUESTS_TEST_FLAG"
+        os.environ.pop(name, None)
+        self.assertTrue(env_flag(name, True))
+        self.assertFalse(env_flag(name, False))
+        for raw, expected in (
+            ("0", False), ("false", False), ("OFF", False), ("no", False),
+            ("1", True), ("TRUE", True), ("yes", True), ("on", True),
+        ):
+            os.environ[name] = raw
+            self.assertEqual(env_flag(name, False), expected, raw)
+        os.environ[name] = "maybe"
+        with self.assertRaises(RuntimeError):
+            env_flag(name, True)
+        os.environ.pop(name, None)
+
+        self.assertEqual(
+            normalize_database_url("postgres://u:p@h/db"),
+            "postgresql+psycopg://u:p@h/db",
+        )
+        self.assertEqual(
+            normalize_database_url("postgresql+psycopg://u:p@h/db"),
+            "postgresql+psycopg://u:p@h/db",
+        )
+        supa = normalize_database_url(
+            "postgresql://u:p@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+        )
+        self.assertTrue(supa.startswith("postgresql+psycopg://"))
+        self.assertIn("sslmode=require", supa)
+        already = normalize_database_url(
+            "postgresql://u:p@db.abc.supabase.co:5432/postgres?sslmode=require"
+        )
+        self.assertEqual(already.count("sslmode="), 1)
+        self.assertTrue(uses_transaction_pooler("postgresql+psycopg://u:p@h:6543/postgres"))
+        self.assertFalse(uses_transaction_pooler("postgresql+psycopg://u:p@h:5432/postgres"))
+        self.assertTrue(uses_transaction_pooler(
+            "postgresql+psycopg://u:p@h:5432/postgres?pgbouncer=true"))
+
+    def _fresh_iteration(self, token, submission_count):
+        """request_square against an unopened iteration, with the given history size."""
+        solid = "4" * 1024
+        mixed = "45" * 512
+        varied = (6, 3)
+
+        def pixels(db, model, iteration, x, y):
+            return mixed if (x, y) == varied else solid
+
+        def full(db, model):
+            return {i: game.TOTAL_TILES for i in range(1, 40)}
+
+        ctx = [
+            patch.object(game, "_accepted_counts", full),
+            patch.object(game, "_highest_known_iteration", lambda db, model, gt: 39),
+            patch.object(game, "resolve_reference", lambda db, model, iteration, x, y: 0),
+            patch.object(game, "tile_pixels", pixels),
+            patch.object(game, "_user_submission_count", lambda db, uid: submission_count),
+        ]
+        for c in ctx:
+            c.start()
+        try:
+            return self.square(token, 1), solid, mixed, varied
+        finally:
+            for c in reversed(ctx):
+                c.stop()
+            with SessionLocal() as db:
+                db.query(models.TileHold).filter_by(game_type=1, iteration=40).delete()
+                db.commit()
+
+    def test_interesting_gate_skips_single_colour_tile(self):
+        token = self.register("Curious New")["token"]
+        # 3 submissions so far: the gate is still on.
+        sq, _solid, mixed, varied = self._fresh_iteration(token, 3)
+        self.assertEqual((sq["x"], sq["y"], sq["iteration"]), (*varied, 40))
+        self.assertEqual(sq["level_information"]["pixels"], mixed)
+
+    def test_interesting_gate_off_after_four_submissions(self):
+        token = self.register("Gate Off")["token"]
+        # 4 submissions: allocation stays the plain random pick, even if flat.
+        with patch.object(game.random, "randrange", return_value=0):
+            sq, solid, _mixed, varied = self._fresh_iteration(token, 4)
+        self.assertEqual((sq["x"], sq["y"]), (0, 0))
+        self.assertNotEqual((sq["x"], sq["y"]), varied)
+        self.assertEqual(sq["level_information"]["pixels"], solid)
+
+
+class InterestingGateTests(unittest.TestCase):
+    def test_single_colour_tile_is_skipped(self):
+        seen = []
+
+        def pixels(x, y):
+            seen.append((x, y))
+            return "1111" if (x, y) != (2, 0) else "1212"
+
+        with patch.object(game.random, "shuffle", lambda items: None):
+            picked = game._pick_hold_tile([(0, 0), (1, 0), (2, 0)], pixels, True)
+        self.assertEqual(picked, (2, 0))
+        self.assertEqual(seen, [(0, 0), (1, 0), (2, 0)])
+
+    def test_any_tile_when_every_square_is_single_colour(self):
+        def pixels(x, y):
+            return "a" * 8
+
+        with patch.object(game.random, "shuffle", lambda items: None):
+            picked = game._pick_hold_tile([(0, 0), (1, 0)], pixels, True)
+        self.assertEqual(picked, (0, 0))
+
+    def test_gate_off_keeps_the_random_choice(self):
+        def pixels(x, y):
+            raise AssertionError("reference pixels are not consulted")
+
+        with patch.object(game.random, "choice", return_value=(1, 0)):
+            picked = game._pick_hold_tile([(0, 0), (1, 0)], pixels, False)
+        self.assertEqual(picked, (1, 0))
 
 
 if __name__ == "__main__":

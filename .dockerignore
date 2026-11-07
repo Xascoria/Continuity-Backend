@@ -1,10 +1,9 @@
 .venv
-.git
-.gitignore
-__pycache__
+**/__pycache__
 *.pyc
+.git
 data
 secrets
-prompt.md
-main.py
-backend/test_*.py
+*.db
+*.md
+agent-transcripts

@@ -4,4 +4,5 @@ __pycache__/
 
 # runtime data and secrets
 data/
-secrets/admin.json
+secrets/*.json
+!secrets/*.example.json

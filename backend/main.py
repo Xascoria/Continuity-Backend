@@ -4,14 +4,16 @@ from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 
 from .auth import require_admin_browser
-from .config import FRONTEND_DIR
-from .database import Base, engine
+from .config import FRONTEND_DIR, LOG_ADMIN_REQUESTS
+from .database import Base, describe_database, engine
 from .migrations import run_migrations
 from .request_log import RequestLogMiddleware
 from .routers import admin, user
 
 Base.metadata.create_all(bind=engine)
 run_migrations(engine)  # add columns introduced after a table was first created
+print(f"Database: {describe_database()}", flush=True)
+print(f"Admin request log: {'on' if LOG_ADMIN_REQUESTS else 'off'}", flush=True)
 
 # The built-in docs routes are public, so they are disabled here and re-added
 # below behind admin auth.

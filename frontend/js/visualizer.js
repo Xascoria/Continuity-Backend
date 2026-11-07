@@ -1,6 +1,8 @@
 /* Admin dashboard: Visualizer tab. One canvas per iteration (0 = original). */
 (function ($) {
   var generation = 0; // bumped on every reload so stale responses are ignored
+  var showSolids = false; // red outlines stay off until the button is on
+  var frames = []; // loaded iterations, so the toggle can redraw without fetching again
 
   function showError(msg) {
     $("#viz-error").text(msg || "").prop("hidden", !msg);
@@ -48,6 +50,37 @@
     }
   }
 
+  function isSingleColor(pixels) {
+    if (!pixels) return false;
+    var first = pixels.charAt(0);
+    for (var i = 1; i < pixels.length; i++) {
+      if (pixels.charAt(i) !== first) return false;
+    }
+    return true;
+  }
+
+  function iterationTitle(meta, summary) {
+    return meta.iteration === 0
+      ? "Iteration 0 (original)"
+      : "Iteration " + meta.iteration + " (" + meta.filled_tiles + "/" + summary.total_tiles + " tiles)";
+  }
+
+  function solidLabel(n) {
+    return n + " single-color tile" + (n === 1 ? "" : "s");
+  }
+
+  // Red frame so a flat tile is visible against the rest of the picture.
+  function markSolids(ctx, solids, ts, s) {
+    if (!solids.length) return;
+    var size = ts * s;
+    ctx.strokeStyle = "#e11d48";
+    ctx.lineWidth = Math.max(2, s * 2);
+    var pad = ctx.lineWidth / 2;
+    $.each(solids, function (_, t) {
+      ctx.strokeRect(t.x * size + pad, t.y * size + pad, size - ctx.lineWidth, size - ctx.lineWidth);
+    });
+  }
+
   function renderIteration(meta, summary, data, $card, s) {
     var grid = summary.grid;
     var ts = grid.tile_size;
@@ -55,13 +88,17 @@
     var ctx = canvas.getContext("2d");
     var filled = new Array(grid.columns * grid.rows);
     var info = {};
+    var solids = [];
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     $.each(data.tiles, function (_, t) {
       paintTile(ctx, summary.palette, t, ts, s);
       filled[t.y * grid.columns + t.x] = true;
       info[t.y * grid.columns + t.x] = t;
+      if (isSingleColor(t.pixels)) solids.push(t);
     });
     hatch(ctx, grid, s, filled);
+    if (showSolids) markSolids(ctx, solids, ts, s);
+    $card.find(".viz-solid").text(solidLabel(solids.length));
 
     var $hover = $card.find(".viz-hover");
     $(canvas).off("mousemove mouseleave").on("mousemove", function (e) {
@@ -71,8 +108,11 @@
       var t = info[y * grid.columns + x];
       var text = "tile (" + x + ", " + y + ")";
       if (!t) text += ": not submitted";
-      else if (meta.iteration > 0) {
-        text += ": " + t.username + ", accuracy " + (t.accuracy * 100).toFixed(1) + "%";
+      else {
+        if (meta.iteration > 0) {
+          text += ": " + t.username + ", accuracy " + (t.accuracy * 100).toFixed(1) + "%";
+        }
+        if (isSingleColor(t.pixels)) text += ", single color";
       }
       $hover.text(text);
     }).on("mouseleave", function () { $hover.text(""); });
@@ -83,6 +123,7 @@
     var mode = $("#viz-mode").val();
     var s = scale();
     showError("");
+    frames = [];
     $("#viz-grid").empty();
     Admin.api("GET", "/api/admin/visualizer?game_type=" + mode).done(function (summary) {
       if (gen !== generation) return;
@@ -91,10 +132,8 @@
       var queue = [];
       $.each(summary.iterations, function (_, meta) {
         var $card = $("<div class='viz-card'>");
-        $("<h3>").text(meta.iteration === 0
-          ? "Iteration 0 (original)"
-          : "Iteration " + meta.iteration + " (" + meta.filled_tiles + "/" + summary.total_tiles + " tiles)")
-          .appendTo($card);
+        $("<h3>").text(iterationTitle(meta, summary)).appendTo($card);
+        $("<p class='viz-solid'>").text("Counting single-color tiles...").appendTo($card);
         $("<canvas>").attr({ width: grid.columns * grid.tile_size * s,
                              height: grid.rows * grid.tile_size * s }).appendTo($card);
         $("<div class='viz-hover'>").appendTo($card);
@@ -108,6 +147,7 @@
         Admin.api("GET", "/api/admin/visualizer/iteration?game_type=" + mode +
                   "&iteration=" + item.meta.iteration).done(function (data) {
           if (gen !== generation) return;
+          frames.push({ meta: item.meta, summary: summary, data: data, $card: item.$card, scale: s });
           renderIteration(item.meta, summary, data, item.$card, s);
           next();
         }).fail(function () { showError("Failed to load iteration " + item.meta.iteration); });
@@ -115,9 +155,24 @@
     }).fail(function (xhr) { showError("Request failed (" + xhr.status + ")"); });
   }
 
+  function paintToggle() {
+    $("#viz-solids")
+      .toggleClass("secondary", !showSolids)
+      .attr("aria-pressed", showSolids ? "true" : "false")
+      .text(showSolids ? "Hide single-color outlines" : "Show single-color outlines");
+  }
+
   $(function () {
+    paintToggle();
     $("#viz-mode, #viz-scale").on("change", load);
     $("#viz-refresh").on("click", load);
+    $("#viz-solids").on("click", function () {
+      showSolids = !showSolids;
+      paintToggle();
+      $.each(frames, function (_, frame) {
+        renderIteration(frame.meta, frame.summary, frame.data, frame.$card, frame.scale);
+      });
+    });
   });
   $(document).on("admin:tab", function (_e, name) {
     if (name === "visualizer") load();

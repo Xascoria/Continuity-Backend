@@ -6,8 +6,11 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 
 from . import models, security
-from .config import ADMIN_PASSWORD, ADMIN_USERNAME
+from .config import load_admin_credentials
 from .database import get_db
+
+# Fail at startup when the secret file (or ADMIN_USERNAME / ADMIN_PASSWORD) is missing.
+ADMIN_USERNAME, ADMIN_PASSWORD = load_admin_credentials()
 
 # auto_error=False + no WWW-Authenticate header: the browser must not pop up
 # its native login dialog, the dashboard has its own login form.

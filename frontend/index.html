@@ -34,6 +34,8 @@
       <button class="tab" data-tab="database">Database</button>
       <button class="tab" data-tab="suspicious">Suspicious events</button>
       <button class="tab" data-tab="visualizer">Visualizer</button>
+      <button class="tab" data-tab="activities">Player activities</button>
+      <button class="tab" data-tab="leaderboard">Leaderboard</button>
     </nav>
 
     <main class="container">
@@ -77,7 +79,7 @@
       <section id="tab-visualizer" class="tab-panel" hidden>
         <div class="card">
           <h2>Visualizer</h2>
-          <p class="muted small">Iteration 0 is the original image. Every other iteration shows the tiles submitted for it; tiles nobody has submitted yet are hatched. Hover a tile for details.</p>
+          <p class="muted small">Iteration 0 is the original image. Every other iteration shows the tiles submitted for it; tiles nobody has submitted yet are hatched. Show single-color outlines draws a red frame around every tile that is one color. Hover a tile for details.</p>
           <div class="toolbar">
             <label>Game mode
               <select id="viz-mode"><option value="1">1</option><option value="2">2</option></select>
@@ -85,11 +87,72 @@
             <label>Scale
               <select id="viz-scale"><option value="1">1x</option><option value="2" selected>2x</option></select>
             </label>
+            <button id="viz-solids" class="secondary" type="button" aria-pressed="false">Show single-color outlines</button>
             <button id="viz-refresh" class="secondary">Refresh</button>
             <span id="viz-info" class="muted"></span>
           </div>
           <p id="viz-error" class="error" hidden></p>
           <div id="viz-grid"></div>
+        </div>
+      </section>
+
+      <section id="tab-activities" class="tab-panel" hidden>
+        <div class="card">
+          <h2>Player activities</h2>
+          <p class="muted small">Every type-1 submission, newest first. Submitted time is Malaysia time (UTC+8). Submissions so far is how many times that user appears in the log up to and including this row. View shows the reference they were given, or the tile they drew.</p>
+          <div class="toolbar">
+            <button id="act-refresh" class="secondary">Refresh</button>
+            <span id="act-info" class="muted"></span>
+            <span class="spacer"></span>
+            <button id="act-prev" class="secondary">&laquo; Prev</button>
+            <button id="act-next" class="secondary">Next &raquo;</button>
+          </div>
+          <p id="act-error" class="error" hidden></p>
+          <div class="table-wrap">
+            <table id="act-table">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Submitted time (MYT)</th>
+                  <th>Submissions so far</th>
+                  <th>Iteration</th>
+                  <th>Source tile</th>
+                  <th>Drawn tile</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-leaderboard" class="tab-panel" hidden>
+        <div class="card">
+          <h2>Leaderboard</h2>
+          <p class="muted small">Players need at least 10 accepted submissions in that mode. Everyone who qualifies is listed, not only the top 10 a player is shown. Click Submissions or Accuracy to sort. Accuracy is the mean of their submissions.</p>
+          <div class="toolbar">
+            <label>Game mode
+              <select id="lb-mode"><option value="1">1</option><option value="2">2</option></select>
+            </label>
+            <button id="lb-refresh" class="secondary" type="button">Refresh</button>
+            <span id="lb-info" class="muted"></span>
+          </div>
+          <p id="lb-error" class="error" hidden></p>
+        </div>
+        <div class="card">
+          <div class="table-wrap">
+            <table id="lb-table">
+              <thead>
+                <tr>
+                  <th>Rank</th>
+                  <th>Username</th>
+                  <th id="lb-sort-count" class="sortable" tabindex="0">Submissions</th>
+                  <th id="lb-sort-accuracy" class="sortable" tabindex="0">Accuracy</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -126,13 +189,24 @@
         </div>
       </section>
     </main>
+    <div id="tile-modal" class="modal-backdrop" hidden>
+      <div class="modal-card">
+        <h3 id="tile-modal-title"></h3>
+        <canvas id="tile-modal-canvas" width="256" height="256"></canvas>
+        <div class="modal-actions">
+          <button id="tile-modal-close" class="secondary" type="button">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="js/app.js"></script>
   <script src="js/database.js"></script>
   <script src="js/suspicious.js"></script>
-  <script src="js/visualizer.js"></script>
+  <script src="js/visualizer.js?v=4"></script>
+  <script src="js/activities.js"></script>
+  <script src="js/leaderboard.js?v=2"></script>
   <script>Admin.start();</script>
 </body>
 </html>

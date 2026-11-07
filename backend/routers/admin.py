@@ -1,10 +1,10 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, Float, Integer, func, select
+from sqlalchemy import Boolean, DateTime, Float, Integer, func, select, tuple_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,8 @@ router = APIRouter(
 )
 
 MAX_PAGE_SIZE = 200
+# Malaysia has no daylight saving; timestamps are stored as naive UTC.
+_MYT = timezone(timedelta(hours=8))
 
 
 @router.post("/login")
@@ -115,6 +117,16 @@ def suspicious_events(
 # ---- visualizer ---------------------------------------------------------
 
 
+def _single_color(pixels: Optional[str]) -> bool:
+    """True when every pixel of the tile is the same colour."""
+    return bool(pixels) and len(set(pixels)) == 1
+
+
+def _malaysia_timestamp(value: datetime) -> str:
+    """Naive UTC -> Malaysia local time, 'YYYY-MM-DD HH:MM:SS'."""
+    return value.replace(tzinfo=timezone.utc).astimezone(_MYT).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @router.get("/visualizer")
 def visualizer_summary(game_type: int, db: Session = Depends(get_db)):
     """Iterations of a game type with their filled tile counts (iteration 0 = original)."""
@@ -161,7 +173,114 @@ def visualizer_iteration(game_type: int, iteration: int, db: Session = Depends(g
         )
         tiles = [{"x": x, "y": y, "pixels": p, "accuracy": a, "username": u}
                  for x, y, p, a, u in rows]
-    return {"game_type": game_type, "iteration": iteration, "tiles": tiles}
+    return {
+        "game_type": game_type,
+        "iteration": iteration,
+        "single_color_tiles": sum(1 for t in tiles if _single_color(t["pixels"])),
+        "tiles": tiles,
+    }
+
+
+# ---- player activities (type 1) --------------------------------------------
+
+
+def _source_tiles(db: Session, rows: List[models.SubmittedForTypeOne]) -> Dict[int, Optional[str]]:
+    """Reference tile each submission was drawn from, keyed by submission id.
+
+    Iteration 0 is the original image. A missing coordinate or reference
+    (historical rows) has no source tile.
+    """
+    model = models.SubmittedForTypeOne
+    wanted: Dict[tuple, Optional[str]] = {}
+    for row in rows:
+        if row.reference_iteration and row.x is not None and row.y is not None:
+            wanted.setdefault((row.reference_iteration, row.x, row.y), None)
+    if wanted:
+        found = (
+            db.query(model.iteration, model.x, model.y, model.submitted_string)
+            .filter(tuple_(model.iteration, model.x, model.y).in_(list(wanted)))
+            .all()
+        )
+        for iteration, x, y, pixels in found:
+            wanted[(iteration, x, y)] = pixels
+    out: Dict[int, Optional[str]] = {}
+    for row in rows:
+        if row.x is None or row.y is None or row.reference_iteration is None:
+            out[row.id] = None
+        elif row.reference_iteration == 0:
+            out[row.id] = game.original_tile(row.x, row.y)
+        else:
+            out[row.id] = wanted.get((row.reference_iteration, row.x, row.y))
+    return out
+
+
+@router.get("/player_activities")
+def player_activities(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    """Every type-1 submission, newest first.
+
+    submitted_time is Malaysia time (UTC+8). submissions_so_far counts how
+    many rows that user has in submitted_for_type_one up to and including
+    this one, ordered by submission time. source_tile is the reference they
+    were shown; drawn_tile is what they submitted.
+    """
+    model = models.SubmittedForTypeOne
+    limit = max(1, min(limit, MAX_PAGE_SIZE))
+    offset = max(offset, 0)
+    total = db.query(func.count(model.id)).scalar() or 0
+    # ROWS frame so two rows with the same timestamp each get their own count.
+    so_far = func.count(model.id).over(
+        partition_by=model.user_id,
+        order_by=(model.created_at, model.id),
+        rows=(None, 0),
+    ).label("submissions_so_far")
+    page = (
+        db.query(model, models.User.username, so_far)
+        .join(models.User, models.User.user_id == model.user_id)
+        .order_by(model.created_at.desc(), model.id.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+    submissions = [row[0] for row in page]
+    sources = _source_tiles(db, submissions)
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "palette": dict(zip(game.PALETTE, game.PALETTE_HEX)),
+        "tile_size": game.TILE_SIZE,
+        "activities": [
+            {
+                "id": sub.id,
+                "username": username,
+                "submitted_time": _malaysia_timestamp(sub.created_at),
+                "submissions_so_far": count,
+                "iteration": sub.iteration,
+                "x": sub.x,
+                "y": sub.y,
+                "source_iteration": sub.reference_iteration,
+                "source_tile": sources[sub.id],
+                "drawn_tile": sub.submitted_string,
+            }
+            for sub, username, count in page
+        ],
+    }
+
+
+# ---- leaderboard ------------------------------------------------------------
+
+
+@router.get("/leaderboard")
+def admin_leaderboard(game_type: int, db: Session = Depends(get_db)):
+    """Full game leaderboard: the 10-submission minimum, with no top-10 cap."""
+    if game_type not in (1, 2):
+        raise HTTPException(status_code=400, detail="game_type must be 1 or 2")
+    board = game.full_leaderboard(db, game_type)
+    return {
+        "game_type": game_type,
+        "minimum_contributions": game.LEADERBOARD_MIN_CONTRIBUTIONS,
+        **board,
+    }
 
 
 # ---- bans ------------------------------------------------------------------
@@ -221,7 +340,12 @@ def unban_ip(body: IpIn, db: Session = Depends(get_db)):
 
 
 def _get_table(name: str):
-    table = Base.metadata.tables.get(name)
+    tables = Base.metadata.tables
+    table = tables.get(name)
+    # Postgres tables live in a schema, so the metadata key is "app.users"
+    # while the API and the dashboard keep using "users".
+    if table is None and Base.metadata.schema and "." not in name:
+        table = tables.get(f"{Base.metadata.schema}.{name}")
     if table is None:
         raise HTTPException(status_code=404, detail=f"Unknown table: {name}")
     return table
@@ -300,9 +424,10 @@ def _get_row(db: Session, table, pk_value: int):
 
 @router.get("/tables")
 def list_tables():
+    tables = sorted(Base.metadata.tables.values(), key=lambda item: item.name)
     return [
         {
-            "name": name,
+            "name": table.name,
             "primary_key": _pk_column(table).name,
             "columns": [
                 {
@@ -317,7 +442,7 @@ def list_tables():
                 for c in table.columns
             ],
         }
-        for name, table in sorted(Base.metadata.tables.items())
+        for table in tables
     ]
 
 

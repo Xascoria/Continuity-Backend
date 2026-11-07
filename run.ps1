@@ -7,6 +7,7 @@
   .\run.ps1 -Logs    # follow the logs
   .\run.ps1 -Down    # stop and remove the containers (data is kept in ./data)
   .\run.ps1 -Port 9000
+  $env:LOG_ADMIN_REQUESTS = "0"; .\run.ps1   # do not collect admin request logs
 #>
 param(
     [switch]$Down,

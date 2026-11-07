@@ -3,6 +3,12 @@ services:
     build: .
     ports:
       - "${PORT:-8000}:8000"
+    environment:
+      # Default 1 keeps today's behavior. `$env:LOG_ADMIN_REQUESTS='0'; .\run.ps1`
+      # stops writing admin_requests. DATABASE_URL is intentionally not passed
+      # in, so a shell variable pointed at Supabase cannot switch this container
+      # off the SQLite file in ./data.
+      LOG_ADMIN_REQUESTS: ${LOG_ADMIN_REQUESTS:-1}
     volumes:
       - ./data:/app/data
       - ./secrets:/app/secrets:ro

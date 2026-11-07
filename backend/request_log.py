@@ -1,6 +1,7 @@
 """ASGI middleware that logs every /api/* request.
 
-* /api/admin/*  -> `admin_requests`  (user tokens/uuids are redacted)
+* /api/admin/*  -> `admin_requests`  (user tokens/uuids are redacted),
+  unless LOG_ADMIN_REQUESTS is off
 * everything else under /api -> `users_requests` (tokens are kept, and also
   copied into the `token` column)
 
@@ -14,7 +15,7 @@ import time
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
-from . import security
+from . import config, security
 from .database import SessionLocal
 from .models import AdminRequest, UsersRequest
 
@@ -131,6 +132,11 @@ class RequestLogMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not scope["path"].startswith("/api"):
+            await self.app(scope, receive, send)
+            return
+
+        # Still served. Nothing is read off the body and nothing is stored.
+        if _is_admin_path(scope["path"]) and not config.LOG_ADMIN_REQUESTS:
             await self.app(scope, receive, send)
             return
 

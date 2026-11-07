@@ -46,6 +46,9 @@ MIN_PAINTED = math.ceil(0.60 * TILE_PIXELS)  # 615
 MAX_FETCH_TILES = 100
 LEADERBOARD_MIN_CONTRIBUTIONS = 10
 LEADERBOARD_LIST_SIZE = 10
+# While a user has this many game-type-1 submissions or fewer, request_square
+# avoids handing them a single-colour tile.
+INTERESTING_GATE_SUBMISSIONS = 3
 
 # Bump when the image, palette symbol table or rules change (clients drop caches).
 CACHE_VERSION = "1"
@@ -293,10 +296,40 @@ def build_level(db: Session, model, game_type: int, iteration: int, x: int, y: i
 # ---- request_square ------------------------------------------------------------
 
 
+def _user_submission_count(db: Session, user_id: int) -> int:
+    """Accepted game-type-1 submissions so far."""
+    model = models.SUBMISSION_MODELS[1]
+    return (
+        db.query(func.count(model.id)).filter(model.user_id == user_id).scalar() or 0
+    )
+
+
+def _pick_hold_tile(candidates: List[Tuple[int, int]], pixels_of, interesting: bool
+                    ) -> Tuple[int, int]:
+    """Pick a tile that can be held.
+
+    With the interesting gate on, a reference whose pixels are a single colour
+    (`len(set(pixels)) == 1`) is skipped. If every candidate is a single colour,
+    any one of them is returned.
+    """
+    if not interesting:
+        return random.choice(candidates)
+    order = list(candidates)
+    random.shuffle(order)
+    for x, y in order:
+        pixels = pixels_of(x, y)
+        if pixels is None or len(set(pixels)) != 1:
+            return x, y
+    return order[0]
+
+
 def request_square(db: Session, user: models.User, game_type: int,
                    client_ip: Optional[str] = None) -> dict:
     model = models.SUBMISSION_MODELS[game_type]
     with _LOCK:
+        interesting = (
+            _user_submission_count(db, user.user_id) <= INTERESTING_GATE_SUBMISSIONS
+        )
         for _attempt in range(3):
             now = utcnow()
             # A new request abandons the user's previous hold(s) for this game
@@ -323,17 +356,33 @@ def request_square(db: Session, user: models.User, game_type: int,
 
             counts = _accepted_counts(db, model)
             top = _highest_known_iteration(db, model, game_type)
-            chosen = None
+            pool = None
             for iteration in range(1, top + 1):
                 if counts.get(iteration, 0) >= TOTAL_TILES:
                     continue
                 free = _free_tiles(db, model, game_type, iteration, now)
                 if free:
-                    chosen = (iteration, random.choice(free))
+                    pool = free
                     break
-            if chosen is None:  # open the next iteration
-                chosen = (top + 1, (random.randrange(GRID_COLUMNS), random.randrange(GRID_ROWS)))
-            iteration, (x, y) = chosen
+            else:
+                iteration = top + 1  # open the next iteration
+                if interesting:
+                    pool = [
+                        (x, y)
+                        for y in range(GRID_ROWS)
+                        for x in range(GRID_COLUMNS)
+                    ]
+                else:
+                    pool = [(
+                        random.randrange(GRID_COLUMNS),
+                        random.randrange(GRID_ROWS),
+                    )]
+
+            def reference_pixels(x: int, y: int) -> Optional[str]:
+                reference = resolve_reference(db, model, iteration, x, y)
+                return tile_pixels(db, model, reference, x, y)
+
+            x, y = _pick_hold_tile(pool, reference_pixels, interesting)
 
             level, reference, sources = build_level(db, model, game_type, iteration, x, y)
             try:
@@ -492,7 +541,8 @@ def submit_result(db: Session, user: models.User, **kwargs) -> dict:
 # ---- request_leaderboard ----------------------------------------------------------
 
 
-def leaderboard(db: Session, user: models.User, game_type: int) -> dict:
+def qualified_players(db: Session, game_type: int) -> List[dict]:
+    """Users with at least the contribution minimum for this game type."""
     model = models.SUBMISSION_MODELS[game_type]
     count = func.count(model.id)
     rows = (
@@ -502,29 +552,53 @@ def leaderboard(db: Session, user: models.User, game_type: int) -> dict:
         .having(count >= LEADERBOARD_MIN_CONTRIBUTIONS)
         .all()
     )
-    players = [
+    return [
         {"user_id": uid, "username": name, "count": n, "accuracy": acc or 0.0}
         for uid, name, n, acc in rows
     ]
 
+
+def rank_players(players: List[dict], metric: str) -> List[dict]:
+    """Same order the game uses: metric descending, then username, then user id."""
+    ordered = sorted(
+        players, key=lambda p: (-p[metric], p["username"].lower(), p["user_id"])
+    )
+    return [
+        {"rank": i + 1, "user_id": p["user_id"], "username": p["username"],
+         "count": p["count"], "accuracy": p["accuracy"]}
+        for i, p in enumerate(ordered)
+    ]
+
+
+def leaderboard(db: Session, user: models.User, game_type: int) -> dict:
+    players = qualified_players(db, game_type)
+
     def ranked(metric: str) -> List[dict]:
-        ordered = sorted(
-            players, key=lambda p: (-p[metric], p["username"].lower(), p["user_id"])
-        )
-        entries = [
-            {"rank": i + 1, "username": p["username"], "count": p["count"],
-             "accuracy": p["accuracy"], "is_current_user": p["user_id"] == user.user_id,
-             "_uid": p["user_id"]}
-            for i, p in enumerate(ordered)
-        ]
+        entries = rank_players(players, metric)
+        for entry in entries:
+            entry["is_current_user"] = entry["user_id"] == user.user_id
         top = entries[:LEADERBOARD_LIST_SIZE]
-        if not any(e["is_current_user"] for e in top):
-            top += [e for e in entries if e["is_current_user"]]
-        for e in top:
-            del e["_uid"]
+        if not any(entry["is_current_user"] for entry in top):
+            top += [entry for entry in entries if entry["is_current_user"]]
+        for entry in top:
+            del entry["user_id"]
         return top
 
     return {"top_contributors": ranked("count"), "top_accuracy": ranked("accuracy")}
+
+
+def full_leaderboard(db: Session, game_type: int) -> dict:
+    """Every qualified player, not only the top 10 a player is shown."""
+    players = qualified_players(db, game_type)
+
+    def listed(metric: str) -> List[dict]:
+        return [
+            {"rank": entry["rank"], "username": entry["username"],
+             "count": entry["count"], "accuracy": entry["accuracy"]}
+            for entry in rank_players(players, metric)
+        ]
+
+    return {"top_contributors": listed("count"), "top_accuracy": listed("accuracy")}
 
 
 # ---- fetch_current_progress / fetch_tiles -------------------------------------------
